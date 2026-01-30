@@ -2,7 +2,6 @@ EXE_INC = \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I../../../../lnInclude
 
-# Require libsodium for this utility
 ifdef FOAM_USE_SODIUM
     EXE_INC += -DFOAM_USE_SODIUM
 endif

@@ -3,17 +3,58 @@ cd "${0%/*}" || exit                                # Run from this directory
 . ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions        # Tutorial run functions
 #------------------------------------------------------------------------------
 
+# Check for 'doc' argument to build documentation only
+if [ "$1" = "doc" ]; then
+    echo "Building documentation..."
+    if command -v doxygen >/dev/null 2>&1; then
+        doxygen doc/Doxyfile
+        echo ""
+        echo "Documentation built: doc/html/index.html"
+    else
+        echo "Error: doxygen not found. Install doxygen to build documentation."
+        exit 1
+    fi
+    exit 0
+fi
+
+# Check for libsodium (optional encryption support)
+if pkg-config --exists libsodium 2>/dev/null; then
+    echo "libsodium found - building with encryption support"
+    export FOAM_USE_SODIUM=1
+else
+    echo "libsodium not found - building without encryption support"
+    echo "  To enable encryption: install libsodium-dev (Debian/Ubuntu)"
+    echo "                        or libsodium-devel (RHEL/Fedora)"
+fi
+
 # Build the spaceTimeWindow library (BC + function object)
+echo ""
 echo "Building spaceTimeWindow library..."
 wmake src/spaceTimeWindow
 
 # Build the spaceTimeWindowInitCase utility
+echo ""
 echo "Building spaceTimeWindowInitCase utility..."
 wmake src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowInitCase
+
+# Build the spaceTimeWindowKeygen utility (only if encryption enabled)
+if [ -n "$FOAM_USE_SODIUM" ]; then
+    echo ""
+    echo "Building spaceTimeWindowKeygen utility..."
+    wmake src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowKeygen
+fi
 
 echo ""
 echo "Build complete."
 echo "Library: \$FOAM_USER_LIBBIN/libspaceTimeWindow.so"
 echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowInitCase"
+if [ -n "$FOAM_USE_SODIUM" ]; then
+    echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowKeygen"
+    echo "Encryption: enabled"
+else
+    echo "Encryption: disabled (install libsodium to enable)"
+fi
+echo ""
+echo "To build documentation: ./Allwmake doc"
 
 #------------------------------------------------------------------------------

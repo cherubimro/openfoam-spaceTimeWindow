@@ -34,3 +34,6 @@ constant/polyMesh/
 postProcessing/
 *.log
 processor*/
+
+# Documentation output
+doc/html/

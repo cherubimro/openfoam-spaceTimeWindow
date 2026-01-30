@@ -3,6 +3,9 @@ cd "${0%/*}" || exit                                # Run from this directory
 . ${WM_PROJECT_DIR:?}/bin/tools/CleanFunctions      # Tutorial clean functions
 #------------------------------------------------------------------------------
 
+echo "Cleaning spaceTimeWindowKeygen utility..."
+wclean src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowKeygen
+
 echo "Cleaning spaceTimeWindowInitCase utility..."
 wclean src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowInitCase
 
@@ -13,6 +16,7 @@ wclean src/spaceTimeWindow
 echo "Removing installed binaries..."
 rm -f "$FOAM_USER_LIBBIN/libspaceTimeWindow.so" 2>/dev/null
 rm -f "$FOAM_USER_APPBIN/spaceTimeWindowInitCase" 2>/dev/null
+rm -f "$FOAM_USER_APPBIN/spaceTimeWindowKeygen" 2>/dev/null
 
 echo ""
 echo "Clean complete."

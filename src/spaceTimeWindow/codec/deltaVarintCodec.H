@@ -142,19 +142,48 @@ public:
             uint32_t precision = 6
         );
 
+        //- Encode scalar field to buffer (no file I/O)
+        static std::vector<uint8_t> encode
+        (
+            const scalarField& field,
+            uint32_t precision = 6
+        );
+
+        //- Encode vector field to buffer (no file I/O)
+        static std::vector<uint8_t> encode
+        (
+            const vectorField& field,
+            uint32_t precision = 6
+        );
+
         //- Read scalar field from compressed file
         static scalarField readScalar(const fileName& path);
 
         //- Read vector field from compressed file
         static vectorField readVector(const fileName& path);
 
+        //- Decode scalar field from buffer (no file I/O)
+        static scalarField decodeScalar(const std::vector<uint8_t>& buf);
+
+        //- Decode vector field from buffer (no file I/O)
+        static vectorField decodeVector(const std::vector<uint8_t>& buf);
+
         //- Check if file is in delta-varint format (by magic number)
         static bool isDeltaVarintFile(const fileName& path);
+
+        //- Check if buffer is in delta-varint format (by magic number)
+        static bool isDeltaVarintBuffer(const std::vector<uint8_t>& buf);
 
         //- Get file extension for compressed files
         static word fileExtension()
         {
             return "dvz";
+        }
+
+        //- Get magic number (for format detection)
+        static uint32_t magic()
+        {
+            return MAGIC;
         }
 };
 

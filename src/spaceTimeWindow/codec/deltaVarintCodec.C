@@ -400,6 +400,186 @@ Foam::vectorField Foam::deltaVarintCodec::readVector(const fileName& path)
 }
 
 
+std::vector<uint8_t> Foam::deltaVarintCodec::encode
+(
+    const scalarField& field,
+    uint32_t precision
+)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(field.size() * 2);
+
+    // Write header
+    buf.push_back((MAGIC >> 0) & 0xFF);
+    buf.push_back((MAGIC >> 8) & 0xFF);
+    buf.push_back((MAGIC >> 16) & 0xFF);
+    buf.push_back((MAGIC >> 24) & 0xFF);
+
+    uint32_t nElements = static_cast<uint32_t>(field.size());
+    buf.push_back((nElements >> 0) & 0xFF);
+    buf.push_back((nElements >> 8) & 0xFF);
+    buf.push_back((nElements >> 16) & 0xFF);
+    buf.push_back((nElements >> 24) & 0xFF);
+
+    uint32_t nComponents = 1;
+    buf.push_back((nComponents >> 0) & 0xFF);
+    buf.push_back((nComponents >> 8) & 0xFF);
+    buf.push_back((nComponents >> 16) & 0xFF);
+    buf.push_back((nComponents >> 24) & 0xFF);
+
+    buf.push_back((precision >> 0) & 0xFF);
+    buf.push_back((precision >> 8) & 0xFF);
+    buf.push_back((precision >> 16) & 0xFF);
+    buf.push_back((precision >> 24) & 0xFF);
+
+    encodeComponent(buf, field.cdata(), field.size(), 1, 0, precision);
+
+    return buf;
+}
+
+
+std::vector<uint8_t> Foam::deltaVarintCodec::encode
+(
+    const vectorField& field,
+    uint32_t precision
+)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(field.size() * 6);
+
+    // Write header
+    buf.push_back((MAGIC >> 0) & 0xFF);
+    buf.push_back((MAGIC >> 8) & 0xFF);
+    buf.push_back((MAGIC >> 16) & 0xFF);
+    buf.push_back((MAGIC >> 24) & 0xFF);
+
+    uint32_t nElements = static_cast<uint32_t>(field.size());
+    buf.push_back((nElements >> 0) & 0xFF);
+    buf.push_back((nElements >> 8) & 0xFF);
+    buf.push_back((nElements >> 16) & 0xFF);
+    buf.push_back((nElements >> 24) & 0xFF);
+
+    uint32_t nComponents = 3;
+    buf.push_back((nComponents >> 0) & 0xFF);
+    buf.push_back((nComponents >> 8) & 0xFF);
+    buf.push_back((nComponents >> 16) & 0xFF);
+    buf.push_back((nComponents >> 24) & 0xFF);
+
+    buf.push_back((precision >> 0) & 0xFF);
+    buf.push_back((precision >> 8) & 0xFF);
+    buf.push_back((precision >> 16) & 0xFF);
+    buf.push_back((precision >> 24) & 0xFF);
+
+    const scalar* data = reinterpret_cast<const scalar*>(field.cdata());
+
+    for (uint32_t comp = 0; comp < 3; ++comp)
+    {
+        encodeComponent(buf, data, field.size(), 3, comp, precision);
+    }
+
+    return buf;
+}
+
+
+Foam::scalarField Foam::deltaVarintCodec::decodeScalar
+(
+    const std::vector<uint8_t>& buf
+)
+{
+    if (buf.size() < 16)
+    {
+        FatalErrorInFunction
+            << "Buffer too small to contain header"
+            << abort(FatalError);
+    }
+
+    size_t pos = 0;
+
+    uint32_t magic = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    if (magic != MAGIC)
+    {
+        FatalErrorInFunction
+            << "Invalid buffer format (bad magic number)"
+            << abort(FatalError);
+    }
+
+    uint32_t nElements = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    uint32_t nComponents = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    if (nComponents != 1)
+    {
+        FatalErrorInFunction
+            << "Expected scalar field (1 component) but found " << nComponents
+            << abort(FatalError);
+    }
+
+    uint32_t precision = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    scalarField result(nElements);
+    decodeComponent(buf.data(), pos, buf.size(), result.data(), nElements, 1, 0, precision);
+
+    return result;
+}
+
+
+Foam::vectorField Foam::deltaVarintCodec::decodeVector
+(
+    const std::vector<uint8_t>& buf
+)
+{
+    if (buf.size() < 16)
+    {
+        FatalErrorInFunction
+            << "Buffer too small to contain header"
+            << abort(FatalError);
+    }
+
+    size_t pos = 0;
+
+    uint32_t magic = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    if (magic != MAGIC)
+    {
+        FatalErrorInFunction
+            << "Invalid buffer format (bad magic number)"
+            << abort(FatalError);
+    }
+
+    uint32_t nElements = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    uint32_t nComponents = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    if (nComponents != 3)
+    {
+        FatalErrorInFunction
+            << "Expected vector field (3 components) but found " << nComponents
+            << abort(FatalError);
+    }
+
+    uint32_t precision = buf[pos] | (buf[pos+1] << 8) | (buf[pos+2] << 16) | (buf[pos+3] << 24);
+    pos += 4;
+
+    vectorField result(nElements);
+    scalar* data = reinterpret_cast<scalar*>(result.data());
+
+    for (uint32_t comp = 0; comp < 3; ++comp)
+    {
+        decodeComponent(buf.data(), pos, buf.size(), data, nElements, 3, comp, precision);
+    }
+
+    return result;
+}
+
+
 bool Foam::deltaVarintCodec::isDeltaVarintFile(const fileName& path)
 {
     std::ifstream ifs(path, std::ios::binary);
@@ -417,6 +597,18 @@ bool Foam::deltaVarintCodec::isDeltaVarintFile(const fileName& path)
     }
 
     uint32_t magic = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
+    return magic == MAGIC;
+}
+
+
+bool Foam::deltaVarintCodec::isDeltaVarintBuffer(const std::vector<uint8_t>& buf)
+{
+    if (buf.size() < 4)
+    {
+        return false;
+    }
+
+    uint32_t magic = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
     return magic == MAGIC;
 }
 

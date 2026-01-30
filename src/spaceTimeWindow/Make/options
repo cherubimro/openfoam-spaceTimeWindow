@@ -5,3 +5,10 @@ EXE_INC = \
 LIB_LIBS = \
     -lfiniteVolume \
     -lmeshTools
+
+# Optional: Enable encryption support with libsodium
+# Set FOAM_USE_SODIUM=1 environment variable before wmake to enable
+ifdef FOAM_USE_SODIUM
+    EXE_INC += -DFOAM_USE_SODIUM
+    LIB_LIBS += -lsodium
+endif

@@ -190,7 +190,7 @@ spaceTimeWindowInitCase -sourceCase ../ufr2-02 -extractDir ./subset-case
 **What it creates:**
 
 1. `system/controlDict` - With matching solver, deltaT, adjustTimeStep from extraction
-   - **Note:** `endTime` is set to the **second-to-last** available timestep, because the `spaceTimeWindow` BC requires data from the "next" timestep for temporal interpolation
+   - **Note:** `endTime` is set to the **second-to-last** available timestep, because the `spaceTimeWindow` BC reads ahead to the next timestep
 2. `system/fvSchemes`, `system/fvSolution` - Copied from source case
 3. `constant/` files - All physics properties copied (mandatory for fidelity):
    - `turbulenceProperties`, `transportProperties`
@@ -238,9 +238,9 @@ oldInternalFaces
 
 **Notes:**
 - Does NO spatial interpolation (values are pre-computed for exact face positions)
-- Performs linear temporal interpolation between available timesteps if current time falls between two samples
-- Will error (not extrapolate) if simulation time is outside available data range
-- Metadata validation enforces identical `deltaT` to minimize interpolation effects
+- Does NO temporal interpolation - requires exact timestep matching with source simulation
+- Will error if simulation time doesn't match an available timestep
+- Metadata validation enforces identical `deltaT` to ensure timestep alignment
 
 ## Mass Conservation and `fixesValue`
 
@@ -329,9 +329,87 @@ The `writeCompression` setting is **ignored** when using deltaVarint. This is in
 **Auto-detection:**
 The `spaceTimeWindow` BC and `spaceTimeWindowInitCase` automatically detect `.dvz` files and read them correctly. No configuration needed on the reconstruction side.
 
+## Encryption (Optional)
+
+Boundary data can be encrypted using X25519 asymmetric encryption (libsodium sealed boxes). This allows extraction with a public key while requiring the private key for reconstruction.
+
+### Building with Encryption Support
+
+```bash
+cd src/spaceTimeWindow
+export FOAM_USE_SODIUM=1 && wmake
+
+cd applications/utilities/preProcessing/spaceTimeWindowInitCase
+export FOAM_USE_SODIUM=1 && wmake
+
+cd ../spaceTimeWindowKeygen
+export FOAM_USE_SODIUM=1 && wmake
+```
+
+Requires libsodium development package (`libsodium-dev` on Debian/Ubuntu, `libsodium-devel` on RHEL/Fedora).
+
+### Key Generation
+
+```bash
+spaceTimeWindowKeygen
+# Output:
+# Public key:  fqzYQ0U8j27tFEr5WzEMylbvXYP+9CAyk0JhwwZ2rwg=
+# Private key: QgzxB5b+DGPQH8exbWDe18n4Kv0nu5gqljI2RPBCwl4=
+#
+# IMPORTANT: Store the private key securely!
+```
+
+### Encrypted Extraction
+
+Add the public key to the function object configuration:
+
+```cpp
+functions
+{
+    extractSubset
+    {
+        type            spaceTimeWindowExtract;
+        libs            (spaceTimeWindow);
+
+        box             ((0.05 -0.25 0.01) (0.90 0.25 0.38));
+        outputDir       "../subset-case";
+        fields          (U p nut);
+
+        writeFormat     deltaVarint;
+        deltaVarintPrecision  7;
+
+        // Encryption with X25519 public key
+        publicKey       "fqzYQ0U8j27tFEr5WzEMylbvXYP+9CAyk0JhwwZ2rwg=";
+
+        writeControl    timeStep;
+        writeInterval   1;
+    }
+}
+```
+
+Encrypted files have `.enc` extension (e.g., `U.dvz.enc` for compressed+encrypted).
+
+### Decryption During Case Initialization
+
+```bash
+cd subset-case
+spaceTimeWindowInitCase -sourceCase ../source-case
+# Prompts for private key (no echo):
+# Enter private key (base64):
+```
+
+The public key is automatically derived from the private key. All encrypted boundary data is decrypted in-place during initialization.
+
+### Security Properties
+
+- **Sealed box encryption**: Anonymous sender, only recipient (private key holder) can decrypt
+- **X25519 key derivation**: Public key can be computed from private key
+- **No unencrypted data on disk**: Encryption happens before writing during extraction
+- **Compile-time optional**: Without `FOAM_USE_SODIUM=1`, encryption code is not included
+
 ## Time Settings Validation
 
-The library enforces identical time settings between extraction and reconstruction to prevent temporal interpolation/extrapolation errors.
+The library enforces identical time settings between extraction and reconstruction to ensure exact timestep matching.
 
 ### Metadata Storage
 
@@ -370,11 +448,11 @@ Time step mismatch between extraction and reconstruction!
     Patch: oldInternalFaces
 
     The spaceTimeWindow BC requires identical time settings
-    to avoid temporal interpolation/extrapolation errors.
+    for exact timestep matching.
     Please set deltaT = 8.53e-04 in system/controlDict
 ```
 
-**Best Practice:** Use fixed time stepping (`adjustTimeStep = no`) with identical `deltaT` values for both extraction and reconstruction.
+**Best Practice:** Use fixed time stepping (`adjustTimeStep = no`) with identical `deltaT` values for both extraction and reconstruction. All timesteps from the source simulation are required.
 
 ## Building
 
@@ -458,6 +536,7 @@ Anton, A.-A. (2011). *"Space-Time Window Reconstruction in Parallel High Perform
 ## Limitations
 
 - No spatial interpolation - mesh topology must match exactly
-- Temporal extrapolation not allowed - boundary data must cover full simulation time
+- No temporal interpolation - all timesteps from source simulation required
+- Boundary data must cover full reconstruction time range
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`

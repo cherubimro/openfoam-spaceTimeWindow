@@ -68,6 +68,10 @@ Usage
         // Optional: compression (gzip) - ignored for deltaVarint
         writeCompression on;
 
+        // Optional: encryption with libsodium (requires FOAM_USE_SODIUM=1 build)
+        // encrypt         true;
+        // publicKey       "base64-encoded-32-byte-public-key";
+
         writeControl    timeStep;
         writeInterval   1;
     }
@@ -130,6 +134,12 @@ protected:
 
         //- Precision for delta-varint codec (number of significant digits)
         label deltaVarintPrecision_;
+
+        //- Enable encryption of boundary data
+        bool useEncryption_;
+
+        //- Public key for encryption (base64 encoded)
+        string publicKeyBase64_;
 
         //- Mesh subset helper
         autoPtr<fvMeshSubset> meshSubsetPtr_;

@@ -28,8 +28,10 @@ License
 #include "globalIndex.H"
 #include "ListOps.H"
 #include "deltaVarintCodec.H"
+#include "sodiumCrypto.H"
 #include <fstream>
 #include <type_traits>
+#include <cstring>
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -1028,6 +1030,15 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeSubsetMesh()
                 os.writeEntry("nGlobalFaces", nGlobalFaces_);
             }
 
+            // Write format info
+            os << nl << "// Boundary data format" << nl;
+            os.writeEntry("useDeltaVarint", useDeltaVarint_);
+            if (useDeltaVarint_)
+            {
+                os.writeEntry("deltaVarintPrecision", deltaVarintPrecision_);
+            }
+            os.writeEntry("encrypted", useEncryption_);
+
             Info<< "    Written extraction metadata:" << nl
                 << "        openfoamVersion = " << foamVersion::version << nl
                 << "        openfoamApi = " << foamVersion::api << nl
@@ -1453,18 +1464,70 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     {
         if constexpr (std::is_same_v<Type, scalar>)
         {
+#ifdef FOAM_USE_SODIUM
+            if (useEncryption_)
+            {
+                // Compress to buffer, then encrypt
+                std::vector<uint8_t> compressed = deltaVarintCodec::encode(field, deltaVarintPrecision_);
+                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+
+                // Write encrypted file with .dvz.enc extension
+                fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+                return;
+            }
+#endif
             fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
             deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
             return;
         }
         else if constexpr (std::is_same_v<Type, vector>)
         {
+#ifdef FOAM_USE_SODIUM
+            if (useEncryption_)
+            {
+                // Compress to buffer, then encrypt
+                std::vector<uint8_t> compressed = deltaVarintCodec::encode(field, deltaVarintPrecision_);
+                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+
+                // Write encrypted file with .dvz.enc extension
+                fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+                return;
+            }
+#endif
             fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
             deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
             return;
         }
         // For other types, fall through to standard format
     }
+
+#ifdef FOAM_USE_SODIUM
+    // Encryption without delta-varint: encrypt raw binary data
+    if (useEncryption_)
+    {
+        if constexpr (std::is_same_v<Type, scalar> || std::is_same_v<Type, vector>)
+        {
+            // Serialize field to binary buffer
+            std::vector<uint8_t> buffer;
+
+            // Write a simple binary format: size + raw data
+            label fieldSize = field.size();
+            buffer.resize(sizeof(label) + fieldSize * sizeof(Type));
+
+            std::memcpy(buffer.data(), &fieldSize, sizeof(label));
+            std::memcpy(buffer.data() + sizeof(label), field.cdata(), fieldSize * sizeof(Type));
+
+            std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+
+            // Write encrypted file with .enc extension
+            fileName outPath = dir / (fieldName + "." + sodiumCrypto::fileExtension);
+            sodiumCrypto::encryptToFile(outPath, buffer, publicKey);
+            return;
+        }
+    }
+#endif
 
     // Standard OpenFOAM format
     OFstream os
@@ -1519,6 +1582,8 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     writeCompression_(IOstreamOption::UNCOMPRESSED),
     useDeltaVarint_(false),
     deltaVarintPrecision_(6),
+    useEncryption_(false),
+    publicKeyBase64_(),
     meshSubsetPtr_(),
     subsetInitialized_(false),
     meshWritten_(false),
@@ -1629,6 +1694,47 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     else
     {
         Info<< endl;
+    }
+
+    // Read optional encryption settings
+    useEncryption_ = dict.getOrDefault<bool>("encrypt", false);
+    if (useEncryption_)
+    {
+#ifdef FOAM_USE_SODIUM
+        if (!sodiumCrypto::available())
+        {
+            FatalIOErrorInFunction(dict)
+                << "Encryption requested but libsodium failed to initialize" << nl
+                << exit(FatalIOError);
+        }
+
+        if (!dict.readIfPresent("publicKey", publicKeyBase64_))
+        {
+            FatalIOErrorInFunction(dict)
+                << "Encryption enabled but 'publicKey' not specified" << nl
+                << "Generate a keypair with spaceTimeWindowKeygen utility" << nl
+                << exit(FatalIOError);
+        }
+
+        // Validate the public key
+        std::vector<uint8_t> pubKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+        if (pubKey.size() != sodiumCrypto::PUBLIC_KEY_SIZE)
+        {
+            FatalIOErrorInFunction(dict)
+                << "Invalid public key size. Expected "
+                << sodiumCrypto::PUBLIC_KEY_SIZE << " bytes, got "
+                << pubKey.size() << " bytes" << nl
+                << "Ensure you're using a valid base64-encoded 32-byte public key" << nl
+                << exit(FatalIOError);
+        }
+
+        Info<< "    encryption: enabled (sealed box)" << endl;
+#else
+        FatalIOErrorInFunction(dict)
+            << "Encryption requested but library was built without libsodium" << nl
+            << "Rebuild with FOAM_USE_SODIUM=1 to enable encryption" << nl
+            << exit(FatalIOError);
+#endif
     }
 
     return true;

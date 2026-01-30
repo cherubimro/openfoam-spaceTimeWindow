@@ -52,6 +52,7 @@ Usage
 #include "SortableList.H"
 #include "boundBox.H"
 #include "deltaVarintCodec.H"
+#include "sodiumCrypto.H"
 #include <fstream>
 #include <sstream>
 
@@ -81,6 +82,210 @@ void copyDirectory(const fileName& src, const fileName& dst)
         Info<< "    Copied directory: " << src.name() << endl;
     }
 }
+
+
+// Decrypt and decompress boundary data files
+// Returns the base field name (without .enc or .dvz.enc extensions)
+word decryptBoundaryFile
+(
+    const fileName& encryptedPath,
+    const fileName& outputDir,
+    const std::vector<uint8_t>& publicKey,
+    const std::vector<uint8_t>& privateKey,
+    bool verbose = true
+)
+{
+    word fieldName = encryptedPath.name();
+
+    // Determine file type from extension
+    // Possible patterns: fieldName.enc, fieldName.dvz.enc
+    const word encExt = "." + sodiumCrypto::fileExtension;
+    const word dvzExt = "." + deltaVarintCodec::fileExtension();
+    const word dvzEncExt = dvzExt + encExt;
+
+    bool isDvzEnc = fieldName.ends_with(dvzEncExt);
+    bool isEnc = fieldName.ends_with(encExt);
+
+    if (!isEnc)
+    {
+        // Not an encrypted file
+        return word::null;
+    }
+
+    // Strip extensions to get base field name
+    word baseFieldName;
+    if (isDvzEnc)
+    {
+        baseFieldName = fieldName.substr(0, fieldName.size() - dvzEncExt.size());
+    }
+    else
+    {
+        baseFieldName = fieldName.substr(0, fieldName.size() - encExt.size());
+    }
+
+#ifdef FOAM_USE_SODIUM
+    // Decrypt the file
+    std::vector<uint8_t> decrypted = sodiumCrypto::decryptFromFile
+    (
+        encryptedPath,
+        publicKey,
+        privateKey
+    );
+
+    if (decrypted.empty())
+    {
+        FatalErrorInFunction
+            << "Failed to decrypt file: " << encryptedPath << nl
+            << exit(FatalError);
+    }
+
+    fileName outputPath = outputDir / baseFieldName;
+
+    if (isDvzEnc)
+    {
+        // Decrypted data is dvz-compressed - decompress and write as OpenFOAM format
+        // Detect if it's scalar or vector from the dvz header
+        if (deltaVarintCodec::isDeltaVarintBuffer(decrypted))
+        {
+            // Read header to determine type
+            // DVZ format: magic(4) + nFaces(4) + nComponents(4) + precision(4) + data
+            uint32_t nComponents = 0;
+            if (decrypted.size() >= 12)
+            {
+                std::memcpy(&nComponents, decrypted.data() + 8, sizeof(uint32_t));
+            }
+
+            if (nComponents == 3)
+            {
+                // Vector field
+                vectorField field = deltaVarintCodec::decodeVector(decrypted);
+
+                OFstream os(outputPath);
+                os  << "FoamFile" << nl
+                    << "{" << nl
+                    << "    version     2.0;" << nl
+                    << "    format      ascii;" << nl
+                    << "    class       vectorField;" << nl
+                    << "    object      " << baseFieldName << ";" << nl
+                    << "}" << nl << nl;
+                os << field;
+
+                if (verbose)
+                {
+                    Info<< "    Decrypted+decompressed: " << fieldName
+                        << " -> " << baseFieldName << " (vector, "
+                        << field.size() << " values)" << endl;
+                }
+            }
+            else
+            {
+                // Scalar field
+                scalarField field = deltaVarintCodec::decodeScalar(decrypted);
+
+                OFstream os(outputPath);
+                os  << "FoamFile" << nl
+                    << "{" << nl
+                    << "    version     2.0;" << nl
+                    << "    format      ascii;" << nl
+                    << "    class       scalarField;" << nl
+                    << "    object      " << baseFieldName << ";" << nl
+                    << "}" << nl << nl;
+                os << field;
+
+                if (verbose)
+                {
+                    Info<< "    Decrypted+decompressed: " << fieldName
+                        << " -> " << baseFieldName << " (scalar, "
+                        << field.size() << " values)" << endl;
+                }
+            }
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Decrypted data is not valid DVZ format: " << encryptedPath << nl
+                << exit(FatalError);
+        }
+    }
+    else
+    {
+        // Decrypted data is raw binary - write as-is
+        // Format: label(size) + raw Type data
+        // Determine type from size: scalar=8 bytes per value, vector=24 bytes per value
+        label fieldSize = 0;
+        std::memcpy(&fieldSize, decrypted.data(), sizeof(label));
+
+        size_t dataSize = decrypted.size() - sizeof(label);
+        size_t expectedScalarSize = fieldSize * sizeof(scalar);
+        size_t expectedVectorSize = fieldSize * sizeof(vector);
+
+        OFstream os(outputPath);
+        os  << "FoamFile" << nl
+            << "{" << nl
+            << "    version     2.0;" << nl
+            << "    format      ascii;" << nl;
+
+        if (dataSize == expectedVectorSize)
+        {
+            // Vector field
+            vectorField field(fieldSize);
+            std::memcpy(field.data(), decrypted.data() + sizeof(label), dataSize);
+
+            os  << "    class       vectorField;" << nl
+                << "    object      " << baseFieldName << ";" << nl
+                << "}" << nl << nl;
+            os << field;
+
+            if (verbose)
+            {
+                Info<< "    Decrypted: " << fieldName
+                    << " -> " << baseFieldName << " (vector, "
+                    << fieldSize << " values)" << endl;
+            }
+        }
+        else if (dataSize == expectedScalarSize)
+        {
+            // Scalar field
+            scalarField field(fieldSize);
+            std::memcpy(field.data(), decrypted.data() + sizeof(label), dataSize);
+
+            os  << "    class       scalarField;" << nl
+                << "    object      " << baseFieldName << ";" << nl
+                << "}" << nl << nl;
+            os << field;
+
+            if (verbose)
+            {
+                Info<< "    Decrypted: " << fieldName
+                    << " -> " << baseFieldName << " (scalar, "
+                    << fieldSize << " values)" << endl;
+            }
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Cannot determine field type from decrypted data size" << nl
+                << "    File: " << encryptedPath << nl
+                << "    Size: " << fieldSize << " values, " << dataSize << " bytes" << nl
+                << exit(FatalError);
+        }
+    }
+
+    // Remove the encrypted file after successful decryption
+    rm(encryptedPath);
+
+    return baseFieldName;
+#else
+    FatalErrorInFunction
+        << "Cannot decrypt file - library built without libsodium support" << nl
+        << "    File: " << encryptedPath << nl
+        << "    Rebuild with FOAM_USE_SODIUM=1 to enable decryption" << nl
+        << exit(FatalError);
+
+    return word::null;
+#endif
+}
+
 
 void writeControlDict
 (
@@ -469,6 +674,59 @@ int main(int argc, char *argv[])
         << "    extractionStartTime = " << metadata.get<scalar>("extractionStartTime") << nl
         << endl;
 
+    // Check if boundary data is encrypted
+    bool isEncrypted = metadata.getOrDefault<bool>("encrypted", false);
+    std::vector<uint8_t> publicKey;
+    std::vector<uint8_t> privateKey;
+
+    if (isEncrypted)
+    {
+#ifdef FOAM_USE_SODIUM
+        Info<< nl << "*** Boundary data is ENCRYPTED ***" << nl << endl;
+
+        if (!sodiumCrypto::available())
+        {
+            FatalErrorInFunction
+                << "Encrypted boundary data detected but libsodium failed to initialize" << nl
+                << exit(FatalError);
+        }
+
+        // Prompt user for private key (no echo)
+        std::string privateKeyB64 = sodiumCrypto::readPrivateKeyFromStdin
+        (
+            "Enter private key (base64): "
+        );
+
+        if (privateKeyB64.empty())
+        {
+            FatalErrorInFunction
+                << "No private key provided" << nl
+                << exit(FatalError);
+        }
+
+        privateKey = sodiumCrypto::fromBase64(privateKeyB64);
+        if (privateKey.size() != sodiumCrypto::PRIVATE_KEY_SIZE)
+        {
+            FatalErrorInFunction
+                << "Invalid private key size. Expected "
+                << sodiumCrypto::PRIVATE_KEY_SIZE << " bytes, got "
+                << privateKey.size() << " bytes" << nl
+                << exit(FatalError);
+        }
+
+        // Derive public key from private key
+        // For X25519 (used by sealed boxes), public = scalarmult_base(private)
+        publicKey = sodiumCrypto::derivePublicKey(privateKey);
+
+        Info<< "Public key derived. Decrypting boundary data..." << nl << endl;
+#else
+        FatalErrorInFunction
+            << "Boundary data is encrypted but library was built without libsodium" << nl
+            << "Rebuild with FOAM_USE_SODIUM=1 to enable decryption" << nl
+            << exit(FatalError);
+#endif
+    }
+
     // Read source controlDict
     fileName sourceControlDictPath = sourceCase / "system" / "controlDict";
     IFstream sourceControlDictIs(sourceControlDictPath);
@@ -513,12 +771,52 @@ int main(int argc, char *argv[])
     word maxTimeName = timeList.last().second();
 
     // Second-to-last timestep - this is the usable endTime
-    // because the BC needs to interpolate using data from the next timestep
+    // because the BC reads ahead to the next timestep
     word endTimeName = timeList[timeList.size() - 2].second();
 
     Info<< "Boundary data time range: " << minTimeName << " to " << maxTimeName << nl
-        << "    Usable endTime: " << endTimeName << " (last timestep data needed for interpolation)" << nl
+        << "    Usable endTime: " << endTimeName << " (BC requires next timestep data)" << nl
         << endl;
+
+    // If encrypted, decrypt all boundary data files now
+    if (isEncrypted)
+    {
+#ifdef FOAM_USE_SODIUM
+        Info<< nl << "Decrypting boundary data files..." << endl;
+
+        label totalDecrypted = 0;
+
+        // Process each time directory
+        for (const auto& timePair : timeList)
+        {
+            const word& timeName = timePair.second();
+            fileName timeDir = patchBoundaryDir / timeName;
+
+            // Get all files in this time directory
+            fileNameList files = readDir(timeDir, fileName::FILE);
+
+            for (const fileName& f : files)
+            {
+                // Check if it's an encrypted file
+                if (f.ends_with("." + sodiumCrypto::fileExtension))
+                {
+                    decryptBoundaryFile
+                    (
+                        timeDir / f,
+                        timeDir,
+                        publicKey,
+                        privateKey,
+                        false  // Not verbose for each file
+                    );
+                    totalDecrypted++;
+                }
+            }
+        }
+
+        Info<< "    Decrypted " << totalDecrypted << " files across "
+            << timeList.size() << " timesteps" << nl << endl;
+#endif
+    }
 
     // Create target directories
     mkDir(extractDir / "system");

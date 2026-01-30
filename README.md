@@ -1,6 +1,10 @@
 # spaceTimeWindow Library
 
-OpenFOAM library for space-time window extraction and reconstruction of LES simulations.
+A library for space-time window extraction and reconstruction of LES simulations, developed for OpenFOAM.
+
+**Tested with:** OpenFOAM v2512 (openfoam.com)
+
+> **Trademark Notice:** This offering is not approved or endorsed by OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com, and owner of the OPENFOAM and OpenCFD trade marks. OPENFOAM is a registered trade mark of OpenCFD Limited, producer and distributor of the OpenFOAM software via www.openfoam.com.
 
 ## Overview
 
@@ -14,9 +18,36 @@ This library provides three components for extracting a spatial subset from a fu
 
 The workflow is strictly sequential:
 
+### Serial Execution
+
 1. **Extraction phase**: Run the original simulation with `spaceTimeWindowExtract` function object
 2. **Case setup**: Run `spaceTimeWindowInitCase` to configure the reconstruction case
 3. **Reconstruction phase**: Run the solver directly - everything is pre-configured
+
+### Parallel Execution
+
+1. **Extraction phase**: Run the original simulation in parallel with `spaceTimeWindowExtract` function object
+   - The extractor automatically forces a field write at the extraction start time
+   - Boundary data is gathered from all processors and written by master
+2. **Reconstruct fields**: Run `reconstructPar -time <extractionStartTime>` to reconstruct the initial time
+3. **Case setup**: Run `spaceTimeWindowInitCase -sourceCase <path>` to create subset mesh and initial fields
+4. **Reconstruction phase**: Run the solver on the subset case
+
+```bash
+# Example parallel workflow
+cd source-case
+mpirun -np 4 pimpleFoam -parallel    # Extraction happens automatically
+
+# Reconstruct the extraction start time
+reconstructPar -time 0.0001          # Use actual extraction start time
+
+# Initialize the subset case
+cd ../subset-case
+spaceTimeWindowInitCase -sourceCase ../source-case
+
+# Run reconstruction (can be serial or parallel)
+pimpleFoam
+```
 
 ## Components
 
@@ -90,8 +121,35 @@ outputDir/
 - The mesh is written with only `oldInternalFaces` patch (type `patch`)
 - Boundary data is written at every timestep (in `execute()`), not just at write intervals
 - The `extractionMetadata` file includes the list of all extracted timesteps (exact directory names)
-- Currently only supports serial execution (will error if run in parallel)
+- **Supports both serial and parallel execution**
 - Face values are computed using linear interpolation: `U_face = w * U_inside + (1-w) * U_outside`
+
+**Parallel Execution:**
+- The extraction box can span multiple processor domains
+- Boundary data from all processors is gathered to the master and written as a single file
+- Processor boundary faces (where the extraction boundary crosses processor boundaries) are handled automatically
+- Field interpolation correctly exchanges values between processors for faces on processor boundaries
+- **Automatic field write**: At extraction start time, the extractor forces the solver to write all fields to disk
+- **Mesh handling**: In parallel mode, only extraction box parameters are written (not the mesh)
+- `spaceTimeWindowInitCase` creates the subset mesh from the reconstructed source case, ensuring correct cell ordering
+
+**Parallel Extraction Output:**
+```
+outputDir/
+    constant/
+        polyMesh/
+            extractionBox       # Extraction parameters for mesh creation
+        boundaryData/
+            oldInternalFaces/
+                points              # Face centres (gathered from all processors)
+                extractionMetadata  # Settings, timestep list, nProcs info
+                <time>/
+                    U               # Gathered face-interpolated fields
+                    p
+                    nut
+```
+
+**Important:** After parallel extraction, you must run `reconstructPar -time <startTime>` before `spaceTimeWindowInitCase`.
 
 ### spaceTimeWindowInitCase (Utility)
 
@@ -124,6 +182,13 @@ spaceTimeWindowInitCase -sourceCase ../ufr2-02 -extractDir ./subset-case
    - `LESProperties`, `RASProperties`, `g`
 4. Initial field files with `spaceTimeWindow` BC on `oldInternalFaces`
 5. Turbulence fields (nut, k, epsilon, omega, etc.) with appropriate wall functions
+
+**Parallel case handling:**
+
+When the extraction was done in parallel (detected by `extractionBox` file):
+- Creates subset mesh from the reconstructed source case using the extraction bounding box
+- Extracts initial fields from the source case at the extraction start time
+- Requires that `reconstructPar -time <startTime>` was run on the source case first
 
 **After running:**
 ```bash
@@ -242,8 +307,9 @@ wmake
 
 ## Requirements
 
-- OpenFOAM v2512 or compatible version
+- **OpenFOAM v2512** (openfoam.com) or compatible ESI-OpenCFD version
 - The subset mesh must be created using `subsetMesh` with exact cell extraction (no interpolation)
+- For parallel extraction: MPI environment for distributed execution
 
 ## RANS Compatibility
 
@@ -291,7 +357,7 @@ If you use this code please reference:
 
 ## Limitations
 
-- Parallel execution not supported for extraction (run on reconstructed case)
 - No spatial interpolation - mesh topology must match exactly
 - Temporal extrapolation not allowed - boundary data must cover full simulation time
 - Steady-state solvers not supported (requires transient simulation)
+- For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`

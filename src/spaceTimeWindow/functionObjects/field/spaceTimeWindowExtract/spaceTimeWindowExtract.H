@@ -71,6 +71,8 @@ SourceFiles
 #include "fvMeshFunctionObject.H"
 #include "fvMeshSubset.H"
 #include "volFields.H"
+#include "globalIndex.H"
+#include "mapDistribute.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -106,6 +108,9 @@ protected:
         //- Mesh subset helper
         autoPtr<fvMeshSubset> meshSubsetPtr_;
 
+        //- Whether subset has been initialized
+        bool subsetInitialized_;
+
         //- Whether mesh has been written
         bool meshWritten_;
 
@@ -127,6 +132,30 @@ protected:
         //- List of extracted timestep names (precise strings)
         wordList extractedTimesteps_;
 
+        // Parallel support data
+
+        //- Global index for combining face data across processors
+        autoPtr<globalIndex> globalFaceIndexPtr_;
+
+        //- Total number of boundary faces across all processors
+        label nGlobalFaces_;
+
+        //- Map for distributing "outside" cell data in parallel
+        //  For processor boundary faces where the outside cell is remote
+        autoPtr<mapDistribute> outsideCellMapPtr_;
+
+        //- Local indices of faces that need remote outside cell data
+        labelList remoteFaceIndices_;
+
+        //- Remote cell indices (in source processor numbering) needed for interpolation
+        labelList remoteCellIndices_;
+
+        //- Processor IDs for remote cells
+        labelList remoteCellProcs_;
+
+        //- Whether we have processor boundary faces crossing the extraction region
+        bool hasProcessorBoundaryFaces_;
+
 
     // Protected Member Functions
 
@@ -141,6 +170,31 @@ protected:
         //- Initialize the mesh subset
         void initializeSubset();
 
+        //- Initialize parallel communication structures
+        void initializeParallelComm();
+
+        //- Identify faces on processor boundaries that cross extraction region
+        void identifyProcessorBoundaryFaces
+        (
+            const boundBox& bb,
+            const labelList& cellsInBox
+        );
+
+        //- Gather face data to master processor
+        void gatherFaceDataToMaster
+        (
+            vectorField& allFaceCentres,
+            scalarField& allFaceWeights,
+            labelList& allFaceCellsInside,
+            labelList& allFaceCellsOutside
+        ) const;
+
+        //- Gather subset mesh to master and write combined mesh
+        void gatherAndWriteSubsetMesh();
+
+        //- Gather initial fields to master and write combined fields
+        void gatherAndWriteInitialFields();
+
         //- Write subset mesh
         void writeSubsetMesh();
 
@@ -153,11 +207,18 @@ protected:
         //- Update metadata with timestep list (called at end)
         void updateMetadataTimesteps();
 
-        //- Interpolate field to face values
+        //- Interpolate field to face values (handles parallel)
         template<class Type>
         tmp<Field<Type>> interpolateToFaces
         (
             const GeometricField<Type, fvPatchField, volMesh>& vf
+        ) const;
+
+        //- Gather interpolated field values to master
+        template<class Type>
+        tmp<Field<Type>> gatherFieldToMaster
+        (
+            const Field<Type>& localField
         ) const;
 
         //- Write field to file in OpenFOAM format

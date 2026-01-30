@@ -39,6 +39,7 @@ Usage
 #include "argList.H"
 #include "Time.H"
 #include "fvMesh.H"
+#include "fvMeshSubset.H"
 #include "IOdictionary.H"
 #include "IFstream.H"
 #include "OFstream.H"
@@ -49,6 +50,7 @@ Usage
 #include "Tuple2.H"
 #include "DynamicList.H"
 #include "SortableList.H"
+#include "boundBox.H"
 #include <fstream>
 #include <sstream>
 
@@ -540,7 +542,328 @@ int main(int argc, char *argv[])
     copyFile(sourceCase / "constant" / "RASProperties", extractDir / "constant" / "RASProperties");
     copyFile(sourceCase / "constant" / "LESProperties", extractDir / "constant" / "LESProperties");
 
-    // 4. Read subset mesh to get boundary patches
+    // 4. Read or create subset mesh
+    // Check if mesh already exists (serial extraction) or needs to be created (parallel extraction)
+    fileName meshDir = extractDir / "constant" / "polyMesh";
+    fileName extractionBoxPath = meshDir / "extractionBox";
+
+    bool needToCreateMesh = false;
+
+    if (isFile(extractionBoxPath))
+    {
+        // Parallel extraction: mesh needs to be created from source case
+        Info<< nl << "Found extractionBox - creating subset mesh from source case..." << endl;
+        needToCreateMesh = true;
+    }
+    else if (!isFile(meshDir / "points") || !isFile(meshDir / "faces"))
+    {
+        FatalErrorInFunction
+            << "No mesh found in " << meshDir << nl
+            << "    Expected either a complete mesh (serial extraction) or" << nl
+            << "    extractionBox file (parallel extraction)" << nl
+            << exit(FatalError);
+    }
+
+    if (needToCreateMesh)
+    {
+        // Read extraction box parameters
+        IFstream boxIs(extractionBoxPath);
+        dictionary extractionBoxDict(boxIs);
+
+        vector boxMin = extractionBoxDict.get<vector>("boxMin");
+        vector boxMax = extractionBoxDict.get<vector>("boxMax");
+        boundBox bb(boxMin, boxMax);
+
+        Info<< "    Extraction box: " << boxMin << " to " << boxMax << endl;
+
+        // Create Time object for source case
+        Time sourceTime
+        (
+            Time::controlDictName,
+            sourceCase,
+            ".",
+            false,  // enableFunctionObjects
+            false   // enableLibs
+        );
+
+        // Read source mesh
+        fvMesh sourceMesh
+        (
+            IOobject
+            (
+                fvMesh::defaultRegion,
+                sourceTime.constant(),
+                sourceTime,
+                IOobject::MUST_READ
+            )
+        );
+
+        Info<< "    Source mesh has " << sourceMesh.nCells() << " cells" << endl;
+
+        // Find cells inside the box
+        const vectorField& cellCentres = sourceMesh.cellCentres();
+        labelList cellsInBox;
+
+        forAll(cellCentres, celli)
+        {
+            if (bb.contains(cellCentres[celli]))
+            {
+                cellsInBox.append(celli);
+            }
+        }
+
+        Info<< "    Found " << cellsInBox.size() << " cells inside box" << endl;
+
+        if (cellsInBox.empty())
+        {
+            FatalErrorInFunction
+                << "No cells found inside extraction box" << nl
+                << "    Box: " << boxMin << " to " << boxMax << nl
+                << exit(FatalError);
+        }
+
+        // Create mesh subset
+        fvMeshSubset meshSubset(sourceMesh);
+        meshSubset.setCellSubset(cellsInBox);
+
+        const fvMesh& subMesh = meshSubset.subMesh();
+        const polyMesh& pm = subMesh;
+
+        Info<< "    Created subset mesh with " << subMesh.nCells() << " cells" << endl;
+
+        // Write the subset mesh to extractDir
+        mkDir(meshDir);
+
+        // Helper lambda to write FoamFile header
+        auto writeHeader = [](Ostream& os, const word& className, const word& objectName)
+        {
+            os  << "FoamFile" << nl
+                << "{" << nl
+                << "    version     2.0;" << nl
+                << "    format      ascii;" << nl
+                << "    class       " << className << ";" << nl
+                << "    object      " << objectName << ";" << nl
+                << "}" << nl << nl;
+        };
+
+        // Points
+        {
+            OFstream os(meshDir / "points");
+            writeHeader(os, "vectorField", "points");
+            os << pm.points();
+        }
+
+        // Faces
+        {
+            OFstream os(meshDir / "faces");
+            writeHeader(os, "faceList", "faces");
+            os << pm.faces();
+        }
+
+        // Owner
+        {
+            OFstream os(meshDir / "owner");
+            writeHeader(os, "labelList", "owner");
+            os << pm.faceOwner();
+        }
+
+        // Neighbour
+        {
+            OFstream os(meshDir / "neighbour");
+            writeHeader(os, "labelList", "neighbour");
+            os << pm.faceNeighbour();
+        }
+
+        // Boundary - write only oldInternalFaces patch
+        {
+            OFstream os(meshDir / "boundary");
+            writeHeader(os, "polyBoundaryMesh", "boundary");
+
+            const polyBoundaryMesh& bm = pm.boundaryMesh();
+
+            os << "1" << nl << "(" << nl;
+            forAll(bm, patchi)
+            {
+                if (bm[patchi].name() == "oldInternalFaces")
+                {
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl
+                       << "        type            patch;" << nl
+                       << "        nFaces          " << bm[patchi].size() << ";" << nl
+                       << "        startFace       " << bm[patchi].start() << ";" << nl
+                       << "    }" << nl;
+                    break;
+                }
+            }
+            os << ")" << nl;
+        }
+
+        Info<< "    Written subset mesh to " << meshDir << endl;
+
+        // Also extract initial fields from source case at extraction start time
+        // This is needed because parallel extraction doesn't write initial fields
+        // (cell ordering would not match the mesh created here)
+        scalar extractionStartTime = metadata.get<scalar>("extractionStartTime");
+        word startTimeName = minTimeName;
+
+        Info<< nl << "Extracting initial fields from source case at t=" << startTimeName << "..." << endl;
+
+        // Set source time to extraction start time
+        sourceTime.setTime(extractionStartTime, 0);
+
+        // Create initial field time directory
+        fileName initFieldDir = extractDir / startTimeName;
+        mkDir(initFieldDir);
+
+        // Helper to write FoamFile header for fields
+        auto writeFieldHeader = [](Ostream& os, const word& className, const word& objectName)
+        {
+            os  << "FoamFile" << nl
+                << "{" << nl
+                << "    version     2.0;" << nl
+                << "    format      ascii;" << nl
+                << "    class       " << className << ";" << nl
+                << "    object      " << objectName << ";" << nl
+                << "}" << nl << nl;
+        };
+
+        // Get field names from boundaryData first time directory
+        fileNameList firstTimeFiles;
+        for (const fileName& dir : timeDirs)
+        {
+            scalar t;
+            if (readScalar(dir, t) && mag(t - minTime) < SMALL)
+            {
+                firstTimeFiles = readDir(patchBoundaryDir / dir, fileName::FILE);
+                break;
+            }
+        }
+
+        wordList fieldsToExtract;
+        for (const fileName& f : firstTimeFiles)
+        {
+            if (f != "points" && f != "extractionMetadata")
+            {
+                fieldsToExtract.append(f);
+            }
+        }
+
+        // Extract each field that appears in boundaryData
+        for (const word& fieldName : fieldsToExtract)
+        {
+            // Try to read scalar field from source
+            IOobject sfHeader
+            (
+                fieldName,
+                sourceTime.timeName(),
+                sourceMesh,
+                IOobject::READ_IF_PRESENT,
+                IOobject::NO_WRITE
+            );
+
+            if (sfHeader.typeHeaderOk<volScalarField>(true))
+            {
+                volScalarField sf(sfHeader, sourceMesh);
+
+                // Interpolate to subset
+                tmp<volScalarField> tsubField = meshSubset.interpolate(sf);
+                const volScalarField& subField = tsubField();
+
+                // Write to extract directory
+                OFstream os(initFieldDir / fieldName);
+                writeFieldHeader(os, "volScalarField", fieldName);
+
+                os << "dimensions      " << sf.dimensions() << ";" << nl << nl;
+                os << "internalField   nonuniform List<scalar>" << nl
+                   << subField.primitiveField().size() << nl << '(' << nl;
+                forAll(subField.primitiveField(), i)
+                {
+                    os << subField.primitiveField()[i] << nl;
+                }
+                os << ')' << ';' << nl << nl;
+
+                // Write boundary field
+                os << "boundaryField" << nl << '{' << nl;
+                forAll(subMesh.boundary(), patchi)
+                {
+                    const fvPatch& patch = subMesh.boundary()[patchi];
+                    os << "    " << patch.name() << nl
+                       << "    {" << nl
+                       << "        type            calculated;" << nl
+                       << "        value           nonuniform List<scalar>" << nl
+                       << "        " << subField.boundaryField()[patchi].size() << nl
+                       << "        (" << nl;
+                    forAll(subField.boundaryField()[patchi], i)
+                    {
+                        os << "        " << subField.boundaryField()[patchi][i] << nl;
+                    }
+                    os << "        );" << nl
+                       << "    }" << nl;
+                }
+                os << '}' << nl;
+
+                Info<< "    Extracted: " << fieldName << " (scalar)" << endl;
+                continue;
+            }
+
+            // Try to read vector field from source
+            IOobject vfHeader
+            (
+                fieldName,
+                sourceTime.timeName(),
+                sourceMesh,
+                IOobject::READ_IF_PRESENT,
+                IOobject::NO_WRITE
+            );
+
+            if (vfHeader.typeHeaderOk<volVectorField>(true))
+            {
+                volVectorField vf(vfHeader, sourceMesh);
+
+                // Interpolate to subset
+                tmp<volVectorField> tsubField = meshSubset.interpolate(vf);
+                const volVectorField& subField = tsubField();
+
+                // Write to extract directory
+                OFstream os(initFieldDir / fieldName);
+                writeFieldHeader(os, "volVectorField", fieldName);
+
+                os << "dimensions      " << vf.dimensions() << ";" << nl << nl;
+                os << "internalField   nonuniform List<vector>" << nl
+                   << subField.primitiveField().size() << nl << '(' << nl;
+                forAll(subField.primitiveField(), i)
+                {
+                    os << subField.primitiveField()[i] << nl;
+                }
+                os << ')' << ';' << nl << nl;
+
+                // Write boundary field
+                os << "boundaryField" << nl << '{' << nl;
+                forAll(subMesh.boundary(), patchi)
+                {
+                    const fvPatch& patch = subMesh.boundary()[patchi];
+                    os << "    " << patch.name() << nl
+                       << "    {" << nl
+                       << "        type            calculated;" << nl
+                       << "        value           nonuniform List<vector>" << nl
+                       << "        " << subField.boundaryField()[patchi].size() << nl
+                       << "        (" << nl;
+                    forAll(subField.boundaryField()[patchi], i)
+                    {
+                        os << "        " << subField.boundaryField()[patchi][i] << nl;
+                    }
+                    os << "        );" << nl
+                       << "    }" << nl;
+                }
+                os << '}' << nl;
+
+                Info<< "    Extracted: " << fieldName << " (vector)" << endl;
+            }
+        }
+
+        // Keep extractionBox file for reference (documents extraction parameters)
+    }
+
     Info<< nl << "Reading subset mesh..." << endl;
 
     // Create a minimal Time object for the extract case

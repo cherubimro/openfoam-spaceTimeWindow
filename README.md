@@ -279,6 +279,16 @@ cd examples/ufr2-02
 
 See `examples/ufr2-02/README.md` for detailed instructions.
 
+## References
+
+**Must cite:**
+If you use this code please reference:
+- Anton, A.A. (2011). *"Space-Time Window Reconstruction in Parallel High Performance Numeric Simulations. Application for CFD"*, PhD Thesis, Politehnica University of Timisoara. Available at: https://dspace.upt.ro/jspui/handle/123456789/643
+
+**Additional references:**
+- Lyn, D.A., Einav, S., Rodi, W., Park, J.-H. (1995). *"A laser-Doppler velocimetry study of ensemble-averaged characteristics of the turbulent near wake of a square cylinder"*, J. Fluid Mech. 304, 285-319
+- ERCOFTAC Classic Collection Database: Case 043
+
 ## Limitations
 
 - Parallel execution not supported for extraction (run on reconstructed case)

@@ -18,6 +18,9 @@ License
 #include "foamVersion.H"
 #include "token.H"
 #include "IOstreamOption.H"
+#include "deltaVarintCodec.H"
+#include "pTraits.H"
+#include <type_traits>
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
@@ -71,14 +74,57 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
     const instant& timeDir
 ) const
 {
-    const fileName dataPath
+    const fileName baseDir
     (
         this->db().time().globalPath()
       / dataDir_
       / this->patch().name()
       / timeDir.name()
-      / fieldTableName_
     );
+
+    // Check for delta-varint compressed file first (.dvz extension)
+    const fileName dvzPath = baseDir / (fieldTableName_ + "." + deltaVarintCodec::fileExtension());
+
+    if (isFile(dvzPath))
+    {
+        // Read using delta-varint codec
+        // Use type traits to determine scalar vs vector
+        Field<Type> data;
+
+        if constexpr (std::is_same_v<Type, scalar>)
+        {
+            data = deltaVarintCodec::readScalar(dvzPath);
+        }
+        else if constexpr (std::is_same_v<Type, vector>)
+        {
+            data = deltaVarintCodec::readVector(dvzPath);
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Delta-varint codec only supports scalar and vector fields" << nl
+                << "    File: " << dvzPath << nl
+                << "    Type: " << pTraits<Type>::typeName << nl
+                << exit(FatalError);
+        }
+
+        // Verify size matches patch
+        if (data.size() != this->patch().size())
+        {
+            FatalErrorInFunction
+                << "Field size " << data.size()
+                << " does not match patch size " << this->patch().size() << nl
+                << "    File: " << dvzPath << nl
+                << "    Patch: " << this->patch().name() << nl
+                << "    This BC requires pre-computed face values with NO spatial mapping" << nl
+                << exit(FatalError);
+        }
+
+        return data;
+    }
+
+    // Fall back to standard OpenFOAM format
+    const fileName dataPath = baseDir / fieldTableName_;
 
     IFstream is(dataPath);
 
@@ -86,6 +132,7 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
     {
         FatalErrorInFunction
             << "Cannot open file " << dataPath << nl
+            << "    (also checked for " << dvzPath << ")" << nl
             << exit(FatalError);
     }
 

@@ -51,6 +51,7 @@ Usage
 #include "DynamicList.H"
 #include "SortableList.H"
 #include "boundBox.H"
+#include "deltaVarintCodec.H"
 #include <fstream>
 #include <sstream>
 
@@ -744,7 +745,14 @@ int main(int argc, char *argv[])
         {
             if (f != "points" && f != "extractionMetadata")
             {
-                fieldsToExtract.append(f);
+                // Strip .dvz extension if present
+                word fieldName = f;
+                const word dvzExt = "." + deltaVarintCodec::fileExtension();
+                if (fieldName.ends_with(dvzExt))
+                {
+                    fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
+                }
+                fieldsToExtract.append(fieldName);
             }
         }
 
@@ -915,7 +923,14 @@ int main(int argc, char *argv[])
     {
         if (f != "points" && f != "extractionMetadata")
         {
-            extractedFields.append(f);
+            // Strip .dvz extension if present
+            word fieldName = f;
+            const word dvzExt = "." + deltaVarintCodec::fileExtension();
+            if (fieldName.ends_with(dvzExt))
+            {
+                fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
+            }
+            extractedFields.append(fieldName);
         }
     }
 

@@ -55,9 +55,18 @@ Usage
         outputDir       "../ufr2-02-subset"; // Output case directory
         fields          (U p);              // Fields to extract
 
-        // Optional: write format for boundary data (ascii or binary)
+        // Optional: write format for boundary data
+        // Options: ascii, binary, deltaVarint
         // Default: ascii
-        writeFormat     binary;
+        // deltaVarint provides ~2.7% compression ratio (vs raw binary)
+        writeFormat     deltaVarint;
+
+        // Optional: precision for deltaVarint (significant digits)
+        // Default: 6 (matches OpenFOAM's default writePrecision)
+        deltaVarintPrecision  6;
+
+        // Optional: compression (gzip) - ignored for deltaVarint
+        writeCompression on;
 
         writeControl    timeStep;
         writeInterval   1;
@@ -115,6 +124,12 @@ protected:
 
         //- Write compression for boundary data (compressed or uncompressed)
         IOstreamOption::compressionType writeCompression_;
+
+        //- Use delta-varint codec for high-efficiency compression
+        bool useDeltaVarint_;
+
+        //- Precision for delta-varint codec (number of significant digits)
+        label deltaVarintPrecision_;
 
         //- Mesh subset helper
         autoPtr<fvMeshSubset> meshSubsetPtr_;

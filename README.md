@@ -70,6 +70,17 @@ functions
         outputDir       "../subset-case";        // Output case directory
         fields          (U p nut);               // Fields to extract
 
+        // Write format for boundary data (optional)
+        // Options: ascii, binary, deltaVarint
+        // Default: ascii
+        writeFormat     deltaVarint;
+
+        // Precision for deltaVarint (optional, default: 6)
+        deltaVarintPrecision  6;
+
+        // Compression for ascii/binary (optional, ignored for deltaVarint)
+        // writeCompression on;
+
         writeControl    timeStep;
         writeInterval   1;
     }
@@ -78,11 +89,14 @@ functions
 
 **Parameters:**
 
-| Parameter    | Description                                    | Required |
-|--------------|------------------------------------------------|----------|
-| box          | Bounding box as ((minX minY minZ) (maxX maxY maxZ)) | yes |
-| outputDir    | Output case directory for extracted data       | yes      |
-| fields       | List of fields to extract                      | yes      |
+| Parameter    | Description                                    | Required | Default |
+|--------------|------------------------------------------------|----------|---------|
+| box          | Bounding box as ((minX minY minZ) (maxX maxY maxZ)) | yes | - |
+| outputDir    | Output case directory for extracted data       | yes      | - |
+| fields       | List of fields to extract                      | yes      | - |
+| writeFormat  | Format for boundary data: `ascii`, `binary`, or `deltaVarint` | no | ascii |
+| deltaVarintPrecision | Decimal digits for delta-varint quantization | no | 6 |
+| writeCompression | Gzip compression for ascii/binary (ignored for deltaVarint) | no | off |
 
 **Field Selection:**
 
@@ -107,14 +121,16 @@ outputDir/
                 points              # Face centres (reference only)
                 extractionMetadata  # Settings and timestep list
                 <time>/
-                    U               # Face-interpolated velocity
-                    p               # Face-interpolated pressure
-                    nut             # Face-interpolated turbulence viscosity
-    <startTime>/                # Initial subset fields
+                    U               # Face-interpolated velocity (or U.dvz)
+                    p               # Face-interpolated pressure (or p.dvz)
+                    nut             # Face-interpolated turbulence viscosity (or nut.dvz)
+    <startTime>/                # Initial subset fields (always ASCII)
         U
         p
         nut
 ```
+
+**Note:** With `writeFormat deltaVarint`, boundary data files have `.dvz` extension (e.g., `U.dvz`). Initial fields remain ASCII regardless of writeFormat setting.
 
 **Notes:**
 - Box must be **fully internal** to the domain (no intersection with external boundaries)
@@ -144,9 +160,9 @@ outputDir/
                 points              # Face centres (gathered from all processors)
                 extractionMetadata  # Settings, timestep list, nProcs info
                 <time>/
-                    U               # Gathered face-interpolated fields
-                    p
-                    nut
+                    U               # Gathered face-interpolated fields (or U.dvz)
+                    p               # (or p.dvz with deltaVarint)
+                    nut             # (or nut.dvz)
 ```
 
 **Important:** After parallel extraction, you must run `reconstructPar -time <startTime>` before `spaceTimeWindowInitCase`.
@@ -245,6 +261,73 @@ The `fixesValue` option controls how `adjustPhi()` handles flux correction on th
 - Use when: You want `adjustPhi()` to heal/repair mass imbalance caused by face interpolation
 
 **Recommendation:** For LES reconstruction where accurate inflow physics matter, `fixesValue = false` may be preferable as it distributes the mass correction uniformly across the `oldInternalFaces` rather than dumping it all on the outlet.
+
+## Boundary Data Compression
+
+The `writeFormat` parameter controls how boundary data files are written. For long LES simulations with many timesteps, storage can become significant.
+
+### Format Comparison
+
+| Format | Extension | Typical Size | Notes |
+|--------|-----------|--------------|-------|
+| `ascii` | (none) | 100% baseline | Human-readable, default |
+| `binary` | (none) | ~50% | OpenFOAM native binary |
+| `ascii` + gzip | .gz | ~10% | `writeCompression on` |
+| `binary` + gzip | .gz | ~8% | `writeFormat binary` + `writeCompression on` |
+| `deltaVarint` | .dvz | **~2.7%** | Best compression, recommended |
+
+### ASCII and Binary Formats
+
+Standard OpenFOAM formats with optional gzip compression:
+
+```cpp
+// ASCII (default, human-readable)
+writeFormat     ascii;
+
+// Binary (smaller, faster I/O)
+writeFormat     binary;
+
+// Either format with gzip compression
+writeCompression on;
+```
+
+### Delta-Varint Codec (`writeFormat deltaVarint`)
+
+A specialized codec optimized for time-series CFD data that achieves ~97% storage reduction:
+
+**How it works:**
+1. **Component-major ordering**: Stores all Ux values, then Uy, then Uz (groups similar values)
+2. **Delta encoding**: Stores differences between consecutive values (small deltas)
+3. **Quantization**: Rounds deltas to configurable precision (default: 6 decimal digits)
+4. **Varint encoding**: Variable-length integer encoding (1-9 bytes based on magnitude)
+5. **Zigzag encoding**: Efficient encoding of signed integers
+
+**File format:**
+- Magic number: `DVZ1` (0x315A5644)
+- Header: element count, component count, precision
+- First value: stored as raw 8-byte double (exact)
+- Subsequent values: delta-encoded varints
+
+**Precision:**
+- `deltaVarintPrecision 6` means deltas quantized to `round(delta * 10^6)`
+- Precision loss is ~1e-6 relative to consecutive value differences
+- For typical CFD data, this is well below solver tolerance
+
+**What uses deltaVarint:**
+- Boundary data files only (`constant/boundaryData/.../U.dvz`, `p.dvz`)
+
+**Important:** When using `writeFormat deltaVarint`, all other output is written as **uncompressed ASCII**:
+- Initial fields (`<startTime>/U`, `p`) - ASCII
+- Subset mesh (`constant/polyMesh/`) - ASCII
+- Metadata (`extractionMetadata`) - ASCII
+
+The `writeCompression` setting is **ignored** when using deltaVarint. This is intentional because:
+1. Boundary data dominates storage (written every timestep)
+2. Initial fields and mesh are written once
+3. The ~2.7% compression ratio already far exceeds gzip
+
+**Auto-detection:**
+The `spaceTimeWindow` BC and `spaceTimeWindowInitCase` automatically detect `.dvz` files and read them correctly. No configuration needed on the reconstruction side.
 
 ## Time Settings Validation
 

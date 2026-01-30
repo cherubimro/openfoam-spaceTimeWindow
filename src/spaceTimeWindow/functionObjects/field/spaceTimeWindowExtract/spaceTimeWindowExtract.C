@@ -27,7 +27,9 @@ License
 #include "Tuple2.H"
 #include "globalIndex.H"
 #include "ListOps.H"
+#include "deltaVarintCodec.H"
 #include <fstream>
+#include <type_traits>
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -1446,14 +1448,31 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     const Field<Type>& field
 ) const
 {
-    // Create stream with specified format (ASCII or BINARY) and compression
+    // Check if we should use delta-varint codec (only for scalar and vector)
+    if (useDeltaVarint_)
+    {
+        if constexpr (std::is_same_v<Type, scalar>)
+        {
+            fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
+            deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
+            return;
+        }
+        else if constexpr (std::is_same_v<Type, vector>)
+        {
+            fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
+            deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
+            return;
+        }
+        // For other types, fall through to standard format
+    }
+
+    // Standard OpenFOAM format
     OFstream os
     (
         dir / fieldName,
         IOstreamOption(writeFormat_, writeCompression_, IOstreamOption::currentVersion)
     );
 
-    // Write FoamFile header with correct format specification
     const word formatStr =
         (writeFormat_ == IOstreamOption::BINARY) ? "binary" : "ascii";
 
@@ -1498,6 +1517,8 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     fieldNames_(),
     writeFormat_(IOstreamOption::ASCII),
     writeCompression_(IOstreamOption::UNCOMPRESSED),
+    useDeltaVarint_(false),
+    deltaVarintPrecision_(6),
     meshSubsetPtr_(),
     subsetInitialized_(false),
     meshWritten_(false),
@@ -1533,23 +1554,34 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     dict.readEntry("outputDir", outputDir_);
     dict.readEntry("fields", fieldNames_);
 
-    // Read write format (ascii or binary), default to ascii
+    // Read write format (ascii, binary, or deltaVarint), default to ascii
     const word writeFormatStr = dict.getOrDefault<word>("writeFormat", "ascii");
     if (writeFormatStr == "binary")
     {
         writeFormat_ = IOstreamOption::BINARY;
+        useDeltaVarint_ = false;
     }
     else if (writeFormatStr == "ascii")
     {
         writeFormat_ = IOstreamOption::ASCII;
+        useDeltaVarint_ = false;
+    }
+    else if (writeFormatStr == "deltaVarint" || writeFormatStr == "dvz")
+    {
+        // Delta-varint codec for high-efficiency compression
+        useDeltaVarint_ = true;
+        writeFormat_ = IOstreamOption::BINARY;  // Not used but set for consistency
     }
     else
     {
         FatalIOErrorInFunction(dict)
             << "Invalid writeFormat '" << writeFormatStr << "'" << nl
-            << "Valid options are: ascii, binary" << nl
+            << "Valid options are: ascii, binary, deltaVarint" << nl
             << exit(FatalIOError);
     }
+
+    // Read delta-varint precision (significant digits)
+    deltaVarintPrecision_ = dict.getOrDefault<label>("deltaVarintPrecision", 6);
 
     // Read write compression (on/off/true/false/compressed/uncompressed), default to off
     const word writeCompressionStr = dict.getOrDefault<word>("writeCompression", "off");
@@ -1582,8 +1614,22 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
         << "    box:       " << boxMin_ << " " << boxMax_ << nl
         << "    outputDir: " << outputDir_ << nl
         << "    fields:    " << fieldNames_ << nl
-        << "    writeFormat: " << writeFormatStr << nl
-        << "    writeCompression: " << writeCompressionStr << endl;
+        << "    writeFormat: " << writeFormatStr;
+
+    if (useDeltaVarint_)
+    {
+        Info<< " (precision: " << deltaVarintPrecision_ << " digits)";
+    }
+    Info<< nl;
+
+    if (!useDeltaVarint_)
+    {
+        Info<< "    writeCompression: " << writeCompressionStr << endl;
+    }
+    else
+    {
+        Info<< endl;
+    }
 
     return true;
 }
@@ -1650,6 +1696,18 @@ Foam::functionObjects::spaceTimeWindowExtract::interpolateToFaces<Foam::vector>
     const GeometricField<vector, fvPatchField, volMesh>&
 ) const;
 
+template Foam::tmp<Foam::Field<Foam::scalar>>
+Foam::functionObjects::spaceTimeWindowExtract::gatherFieldToMaster<Foam::scalar>
+(
+    const Field<scalar>&
+) const;
+
+template Foam::tmp<Foam::Field<Foam::vector>>
+Foam::functionObjects::spaceTimeWindowExtract::gatherFieldToMaster<Foam::vector>
+(
+    const Field<vector>&
+) const;
+
 template void Foam::functionObjects::spaceTimeWindowExtract::writeField<Foam::scalar>
 (
     const fileName&,
@@ -1661,18 +1719,6 @@ template void Foam::functionObjects::spaceTimeWindowExtract::writeField<Foam::ve
 (
     const fileName&,
     const word&,
-    const Field<vector>&
-) const;
-
-template Foam::tmp<Foam::Field<Foam::scalar>>
-Foam::functionObjects::spaceTimeWindowExtract::gatherFieldToMaster<Foam::scalar>
-(
-    const Field<scalar>&
-) const;
-
-template Foam::tmp<Foam::Field<Foam::vector>>
-Foam::functionObjects::spaceTimeWindowExtract::gatherFieldToMaster<Foam::vector>
-(
     const Field<vector>&
 ) const;
 

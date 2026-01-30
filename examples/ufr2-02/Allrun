@@ -1,0 +1,35 @@
+#!/bin/sh
+cd "${0%/*}" || exit                                # Run from this directory
+. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions        # Tutorial run functions
+#------------------------------------------------------------------------------
+#
+# UFR2-02: Flow around a square cylinder (ERCOFTAC test case)
+#
+# Based on the ERCOFTAC Classic Collection Database Case 043
+# Original mesh setup by Niklas Nordin
+#
+# This case demonstrates flow around a square cylinder at Re = 22000
+# using LES with the Smagorinsky subgrid-scale model.
+#
+# Reference:
+#   Lyn, D.A., Einav, S., Rodi, W., Park, J.-H. (1995)
+#   "A laser-Doppler velocimetry study of ensemble-averaged characteristics
+#   of the turbulent near wake of a square cylinder"
+#   J. Fluid Mech. 304, 285-319
+#
+#------------------------------------------------------------------------------
+
+# Copy initial conditions
+restore0Dir
+
+# Generate blockMeshDict
+echo "Generating blockMeshDict..."
+./generateMeshDict.pl 0.04 0.392 0.4 1.36 0.56 0.001 > constant/polyMesh/blockMeshDict
+
+# Create the mesh
+runApplication blockMesh
+
+# Run the solver
+runApplication $(getApplication)
+
+#------------------------------------------------------------------------------

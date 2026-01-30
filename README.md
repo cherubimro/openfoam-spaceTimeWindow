@@ -264,6 +264,21 @@ fields    (U p nut k omega);
 
 The extraction and reconstruction process is identical to LES. Ensure all transported turbulence quantities are included in the `fields` list.
 
+## Example Case
+
+The `examples/ufr2-02` directory contains a complete LES test case:
+
+- **Case**: ERCOFTAC UFR2-02 - Flow around a square cylinder at Re = 22,000
+- **Acknowledgment**: Mesh generation script by Niklas Nordin (ERCOFTAC Classic Collection Database Case 043)
+- **Reference**: Lyn et al. (1995) J. Fluid Mech. 304, 285-319
+
+```bash
+cd examples/ufr2-02
+./Allrun
+```
+
+See `examples/ufr2-02/README.md` for detailed instructions.
+
 ## Limitations
 
 - Parallel execution not supported for extraction (run on reconstructed case)

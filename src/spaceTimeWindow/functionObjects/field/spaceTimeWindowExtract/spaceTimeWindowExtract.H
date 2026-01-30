@@ -113,6 +113,9 @@ protected:
         //- Write format for boundary data (ascii or binary)
         IOstreamOption::streamFormat writeFormat_;
 
+        //- Write compression for boundary data (compressed or uncompressed)
+        IOstreamOption::compressionType writeCompression_;
+
         //- Mesh subset helper
         autoPtr<fvMeshSubset> meshSubsetPtr_;
 

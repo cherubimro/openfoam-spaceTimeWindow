@@ -1446,11 +1446,11 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     const Field<Type>& field
 ) const
 {
-    // Create stream with specified format (ASCII or BINARY)
+    // Create stream with specified format (ASCII or BINARY) and compression
     OFstream os
     (
         dir / fieldName,
-        IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+        IOstreamOption(writeFormat_, writeCompression_, IOstreamOption::currentVersion)
     );
 
     // Write FoamFile header with correct format specification
@@ -1497,6 +1497,7 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     outputDir_(),
     fieldNames_(),
     writeFormat_(IOstreamOption::ASCII),
+    writeCompression_(IOstreamOption::UNCOMPRESSED),
     meshSubsetPtr_(),
     subsetInitialized_(false),
     meshWritten_(false),
@@ -1550,6 +1551,27 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
             << exit(FatalIOError);
     }
 
+    // Read write compression (on/off/true/false/compressed/uncompressed), default to off
+    const word writeCompressionStr = dict.getOrDefault<word>("writeCompression", "off");
+    if (writeCompressionStr == "on" || writeCompressionStr == "true"
+        || writeCompressionStr == "compressed" || writeCompressionStr == "zstd"
+        || writeCompressionStr == "gzip")
+    {
+        writeCompression_ = IOstreamOption::COMPRESSED;
+    }
+    else if (writeCompressionStr == "off" || writeCompressionStr == "false"
+             || writeCompressionStr == "uncompressed")
+    {
+        writeCompression_ = IOstreamOption::UNCOMPRESSED;
+    }
+    else
+    {
+        FatalIOErrorInFunction(dict)
+            << "Invalid writeCompression '" << writeCompressionStr << "'" << nl
+            << "Valid options are: on, off, compressed, uncompressed" << nl
+            << exit(FatalIOError);
+    }
+
     // Make outputDir absolute if relative
     if (!outputDir_.isAbsolute())
     {
@@ -1560,7 +1582,8 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
         << "    box:       " << boxMin_ << " " << boxMax_ << nl
         << "    outputDir: " << outputDir_ << nl
         << "    fields:    " << fieldNames_ << nl
-        << "    writeFormat: " << writeFormatStr << endl;
+        << "    writeFormat: " << writeFormatStr << nl
+        << "    writeCompression: " << writeCompressionStr << endl;
 
     return true;
 }

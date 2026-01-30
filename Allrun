@@ -1,0 +1,80 @@
+#!/bin/sh
+cd "${0%/*}" || exit                                # Run from this directory
+. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions        # Tutorial run functions
+#------------------------------------------------------------------------------
+#
+# Example workflow for spaceTimeWindow library
+#
+# This script demonstrates the complete extraction and reconstruction workflow.
+# Modify the paths and parameters for your specific case.
+#
+#------------------------------------------------------------------------------
+
+# Configuration - modify these for your case
+SOURCE_CASE="../your-source-case"        # Path to original simulation
+SUBSET_CASE="../your-subset-case"        # Path for extraction output
+BOX="((0.05 -0.25 0.01) (0.90 0.25 0.38))"  # Bounding box (min max)
+FIELDS="(U p nut)"                       # Fields to extract
+
+#------------------------------------------------------------------------------
+# Step 0: Build the library (if not already built)
+#------------------------------------------------------------------------------
+echo "Step 0: Checking library..."
+if [ ! -f "$FOAM_USER_LIBBIN/libspaceTimeWindow.so" ]; then
+    echo "Library not found, building..."
+    ./Allwmake
+fi
+
+#------------------------------------------------------------------------------
+# Step 1: Add extraction function object to source case controlDict
+#------------------------------------------------------------------------------
+echo ""
+echo "Step 1: Configure extraction"
+echo "Add the following to $SOURCE_CASE/system/controlDict:"
+echo ""
+cat << EOF
+functions
+{
+    extractSubset
+    {
+        type            spaceTimeWindowExtract;
+        libs            (spaceTimeWindow);
+
+        box             $BOX;
+        outputDir       "$SUBSET_CASE";
+        fields          $FIELDS;
+
+        writeControl    timeStep;
+        writeInterval   1;
+    }
+}
+EOF
+echo ""
+echo "Then run your simulation (e.g., pimpleFoam) in the source case."
+echo ""
+
+#------------------------------------------------------------------------------
+# Step 2: Initialize the reconstruction case
+#------------------------------------------------------------------------------
+echo "Step 2: Initialize reconstruction case"
+echo "After extraction completes, run:"
+echo ""
+echo "    cd $SUBSET_CASE"
+echo "    spaceTimeWindowInitCase -sourceCase $SOURCE_CASE"
+echo ""
+
+#------------------------------------------------------------------------------
+# Step 3: Run the reconstruction
+#------------------------------------------------------------------------------
+echo "Step 3: Run reconstruction"
+echo "The subset case is now fully configured. Simply run:"
+echo ""
+echo "    cd $SUBSET_CASE"
+echo "    pimpleFoam"
+echo ""
+
+echo "=============================================="
+echo "See README.md for detailed documentation"
+echo "=============================================="
+
+#------------------------------------------------------------------------------

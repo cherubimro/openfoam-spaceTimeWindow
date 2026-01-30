@@ -1,0 +1,19 @@
+#!/bin/sh
+cd "${0%/*}" || exit                                # Run from this directory
+. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions        # Tutorial run functions
+#------------------------------------------------------------------------------
+
+# Build the spaceTimeWindow library (BC + function object)
+echo "Building spaceTimeWindow library..."
+wmake src/spaceTimeWindow
+
+# Build the spaceTimeWindowInitCase utility
+echo "Building spaceTimeWindowInitCase utility..."
+wmake src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowInitCase
+
+echo ""
+echo "Build complete."
+echo "Library: \$FOAM_USER_LIBBIN/libspaceTimeWindow.so"
+echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowInitCase"
+
+#------------------------------------------------------------------------------

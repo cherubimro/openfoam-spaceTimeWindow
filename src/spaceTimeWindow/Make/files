@@ -1,0 +1,4 @@
+fvPatchFields/derived/spaceTimeWindowFvPatchField/spaceTimeWindowFvPatchFields.C
+functionObjects/field/spaceTimeWindowExtract/spaceTimeWindowExtract.C
+
+LIB = $(FOAM_USER_LIBBIN)/libspaceTimeWindow

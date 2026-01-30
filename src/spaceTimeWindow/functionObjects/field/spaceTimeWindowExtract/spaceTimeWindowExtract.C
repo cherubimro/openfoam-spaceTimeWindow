@@ -1446,9 +1446,26 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     const Field<Type>& field
 ) const
 {
-    OFstream os(dir / fieldName);
+    // Create stream with specified format (ASCII or BINARY)
+    OFstream os
+    (
+        dir / fieldName,
+        IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+    );
 
-    // Simple field format - just the data
+    // Write FoamFile header with correct format specification
+    const word formatStr =
+        (writeFormat_ == IOstreamOption::BINARY) ? "binary" : "ascii";
+
+    os  << "FoamFile" << nl
+        << "{" << nl
+        << "    version     2.0;" << nl
+        << "    format      " << formatStr << ";" << nl
+        << "    class       " << Field<Type>::typeName << ";" << nl
+        << "    object      " << fieldName << ";" << nl
+        << "}" << nl << nl;
+
+    // Write field data (format is determined by stream setting)
     os << field;
 }
 
@@ -1479,6 +1496,7 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     boxMax_(Zero),
     outputDir_(),
     fieldNames_(),
+    writeFormat_(IOstreamOption::ASCII),
     meshSubsetPtr_(),
     subsetInitialized_(false),
     meshWritten_(false),
@@ -1514,6 +1532,24 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     dict.readEntry("outputDir", outputDir_);
     dict.readEntry("fields", fieldNames_);
 
+    // Read write format (ascii or binary), default to ascii
+    const word writeFormatStr = dict.getOrDefault<word>("writeFormat", "ascii");
+    if (writeFormatStr == "binary")
+    {
+        writeFormat_ = IOstreamOption::BINARY;
+    }
+    else if (writeFormatStr == "ascii")
+    {
+        writeFormat_ = IOstreamOption::ASCII;
+    }
+    else
+    {
+        FatalIOErrorInFunction(dict)
+            << "Invalid writeFormat '" << writeFormatStr << "'" << nl
+            << "Valid options are: ascii, binary" << nl
+            << exit(FatalIOError);
+    }
+
     // Make outputDir absolute if relative
     if (!outputDir_.isAbsolute())
     {
@@ -1523,7 +1559,8 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     Info<< type() << " " << name() << ":" << nl
         << "    box:       " << boxMin_ << " " << boxMax_ << nl
         << "    outputDir: " << outputDir_ << nl
-        << "    fields:    " << fieldNames_ << endl;
+        << "    fields:    " << fieldNames_ << nl
+        << "    writeFormat: " << writeFormatStr << endl;
 
     return true;
 }

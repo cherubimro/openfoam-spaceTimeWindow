@@ -16,6 +16,8 @@ License
 #include "IFstream.H"
 #include "dictionary.H"
 #include "foamVersion.H"
+#include "token.H"
+#include "IOstreamOption.H"
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
 
@@ -87,7 +89,50 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
             << exit(FatalError);
     }
 
-    // Read field data - expects OpenFOAM Field format
+    // Check if file has FoamFile header (supports both ASCII and binary formats)
+    // Peek at first token to detect header
+    token firstToken(is);
+
+    if (firstToken.isWord() && firstToken.wordToken() == "FoamFile")
+    {
+        // File has FoamFile header - read header dictionary content
+        dictionary headerDict;
+        headerDict.read(is, false);  // Read sub-dictionary content (without leading '{')
+
+        // Parse format from header and set stream format (critical for binary)
+        if (headerDict.found("format"))
+        {
+            const word formatStr = headerDict.get<word>("format");
+            if (formatStr == "binary")
+            {
+                is.format(IOstreamOption::BINARY);
+            }
+            else
+            {
+                is.format(IOstreamOption::ASCII);
+            }
+        }
+
+        // Read field data (format now determined by header)
+        Field<Type> data(is);
+
+        // Verify size matches patch
+        if (data.size() != this->patch().size())
+        {
+            FatalErrorInFunction
+                << "Field size " << data.size()
+                << " does not match patch size " << this->patch().size() << nl
+                << "    File: " << dataPath << nl
+                << "    Patch: " << this->patch().name() << nl
+                << "    This BC requires pre-computed face values with NO spatial mapping" << nl
+                << exit(FatalError);
+        }
+
+        return data;
+    }
+
+    // No header - put token back and read raw field data (backwards compatibility)
+    is.putBack(firstToken);
     Field<Type> data(is);
 
     // Verify size matches patch

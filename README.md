@@ -347,9 +347,26 @@ See `examples/ufr2-02/README.md` for detailed instructions.
 
 ## References
 
-**Must cite:**
-If you use this code please reference:
-- Anton, A.A. (2011). *"Space-Time Window Reconstruction in Parallel High Performance Numeric Simulations. Application for CFD"*, PhD Thesis, Politehnica University of Timisoara. Available at: https://dspace.upt.ro/jspui/handle/123456789/643
+**Acknowledging this work**
+
+If this software has been useful in your research, please consider:
+- Citing: 
+Anton, A.-A. (2011). *"Space-Time Window Reconstruction in Parallel High Performance Numeric Simulations. Application for CFD"*, PhD Thesis, Politehnica University of Timisoara. Available at: https://dspace.upt.ro/jspui/handle/123456789/643
+
+@phdthesis{Anton2011,
+  author    = "Alin-Adrian Anton",
+  title     = "Space-Time Window Reconstruction in High-Performance Numeric Simulations: Application for {CFD}",
+  school    = "Universitatea Politehnica Timișoara",
+  year      = "2011",
+  month     = "November",
+  type      = "PhD thesis",
+  address   = "Timișoara, Romania",
+  publisher = "Editura Politehnica",
+  isbn      = "978-606-554-390-4",
+  url       = "https://dspace.upt.ro/jspui/handle/123456789/643"
+}
+
+- Or acknowledging: "This work made use of openfoam-spaceTimeWindow https://dev.cs.upt.ro/alin.anton/openfoam-spaceTimeWindow"
 
 **Additional references:**
 - Lyn, D.A., Einav, S., Rodi, W., Park, J.-H. (1995). *"A laser-Doppler velocimetry study of ensemble-averaged characteristics of the turbulent near wake of a square cylinder"*, J. Fluid Mech. 304, 285-319

@@ -55,6 +55,10 @@ Usage
         outputDir       "../ufr2-02-subset"; // Output case directory
         fields          (U p);              // Fields to extract
 
+        // Optional: write format for boundary data (ascii or binary)
+        // Default: ascii
+        writeFormat     binary;
+
         writeControl    timeStep;
         writeInterval   1;
     }
@@ -73,6 +77,7 @@ SourceFiles
 #include "volFields.H"
 #include "globalIndex.H"
 #include "mapDistribute.H"
+#include "IOstreamOption.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -104,6 +109,9 @@ protected:
 
         //- Fields to extract
         wordList fieldNames_;
+
+        //- Write format for boundary data (ascii or binary)
+        IOstreamOption::streamFormat writeFormat_;
 
         //- Mesh subset helper
         autoPtr<fvMeshSubset> meshSubsetPtr_;

@@ -245,15 +245,18 @@ How it works:
 
 Example: For flow in the +x direction, use `-outletDirection "(1 0 0)"`:
 ```
-                    outlet (10% of downstream boundary)
-                    +---------+
-                    |         |
-    +---------------+---------+
-    |                         |
-    | oldInternalFaces        |  --> flow direction (+x)
-    | (spaceTimeWindow BC)    |
-    +-------------------------+
+    +-------------------------+--------+
+    |                         |        |
+    | oldInternalFaces        | outlet |  --> flow direction (+x)
+    | (spaceTimeWindow BC)    |  (10%) |
+    |                         |        |
+    +-------------------------+--------+
+                              ^
+                              |
+                    faces furthest in +x direction
 ```
+
+The outlet faces are selected based on **position** (furthest along the outlet direction), not face orientation. All faces on the extraction boundary whose centers are within `outletFraction` (default 10%) of the maximum extent in the outlet direction become the outlet patch.
 
 The outlet patch is configured with:
 - **U**: `inletOutlet` BC (allows outflow, prevents backflow)

@@ -999,7 +999,7 @@ int main(int argc, char *argv[])
                        << "    {" << nl
                        << "        type            patch;" << nl
                        << "        nFaces          " << bm[patchi].size() << ";" << nl
-                       << "        startFace       " << bm[patchi].start() << ";" << nl
+                       << "        startFace       " << pm.nInternalFaces() << ";" << nl
                        << "    }" << nl;
                     break;
                 }

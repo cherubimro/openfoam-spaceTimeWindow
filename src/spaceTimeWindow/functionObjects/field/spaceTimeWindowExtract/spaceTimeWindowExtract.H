@@ -192,6 +192,12 @@ protected:
         //- Whether we have processor boundary faces crossing the extraction region
         bool hasProcessorBoundaryFaces_;
 
+        //- Counter for timesteps since extraction started
+        label timestepCount_;
+
+        //- Whether t_2 (third timestep) has been written to disk
+        bool t2Written_;
+
 
     // Protected Member Functions
 

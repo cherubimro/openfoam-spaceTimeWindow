@@ -1599,7 +1599,9 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     remoteFaceIndices_(),
     remoteCellIndices_(),
     remoteCellProcs_(),
-    hasProcessorBoundaryFaces_(false)
+    hasProcessorBoundaryFaces_(false),
+    timestepCount_(0),
+    t2Written_(false)
 {
     read(dict);
 }
@@ -1750,12 +1752,12 @@ bool Foam::functionObjects::spaceTimeWindowExtract::execute()
     if (!meshWritten_)
     {
         // In parallel mode, force the solver to write current fields to disk
-        // at the extraction start time. This ensures spaceTimeWindowInitCase
+        // at the extraction start time (t_0). This ensures spaceTimeWindowInitCase
         // can extract initial fields from the reconstructed source case.
         if (Pstream::parRun())
         {
             Info<< type() << " " << name()
-                << ": Forcing field write at extraction start time "
+                << ": Forcing field write at extraction start time (t_0) "
                 << mesh_.time().timeName() << endl;
 
             // Use writeNow() to force immediate write of all fields
@@ -1764,9 +1766,7 @@ bool Foam::functionObjects::spaceTimeWindowExtract::execute()
             // Barrier to ensure all processors have finished writing
             UPstream::barrier(UPstream::worldComm);
 
-            Info<< "    Field write complete. Run reconstructPar -time "
-                << mesh_.time().timeName()
-                << " before spaceTimeWindowInitCase" << endl;
+            Info<< "    Field write complete (t_0)." << endl;
         }
 
         writeSubsetMesh();
@@ -1776,6 +1776,34 @@ bool Foam::functionObjects::spaceTimeWindowExtract::execute()
     // Write boundary data at EVERY timestep (not just write intervals)
     // This is critical - the spaceTimeWindow BC needs data at every timestep
     writeBoundaryData();
+
+    // Force write at t_2 (third timestep, index 2) for spaceTimeWindowInitCase
+    // Cubic interpolation requires t_0 and t_1 as lookback buffer, so the
+    // reconstruction case starts at t_2. We need this timestep on disk.
+    if (!t2Written_ && timestepCount_ == 2)
+    {
+        Info<< type() << " " << name()
+            << ": Forcing field write at t_2 (reconstruction start time) "
+            << mesh_.time().timeName() << endl;
+
+        // Use writeNow() to force immediate write of all fields
+        const_cast<Time&>(mesh_.time()).writeNow();
+
+        // Barrier to ensure all processors have finished writing
+        if (Pstream::parRun())
+        {
+            UPstream::barrier(UPstream::worldComm);
+        }
+
+        Info<< "    Field write complete (t_2). Run reconstructPar -time "
+            << mesh_.time().timeName()
+            << " before spaceTimeWindowInitCase" << endl;
+
+        t2Written_ = true;
+    }
+
+    // Increment timestep counter
+    ++timestepCount_;
 
     return true;
 }

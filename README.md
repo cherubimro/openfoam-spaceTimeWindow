@@ -24,12 +24,16 @@ The workflow is strictly sequential:
 2. **Case setup**: Run `spaceTimeWindowInitCase` to configure the reconstruction case
 3. **Reconstruction phase**: Run the solver directly - everything is pre-configured
 
+**Note:** In serial mode, the extractor writes internal fields only at t_0 (extraction start). The t_1 and t_2 internal fields are NOT automatically saved. If you need linear interpolation starting at t_1, ensure your `writeInterval` captures t_1, or use parallel mode which forces writes at t_0, t_1, and t_2.
+
 ### Parallel Execution
 
 1. **Extraction phase**: Run the original simulation in parallel with `spaceTimeWindowExtract` function object
-   - The extractor automatically forces a field write at the extraction start time
+   - The extractor automatically forces field writes at t_0, t_1, and t_2
    - Boundary data is gathered from all processors and written by master
-2. **Reconstruct fields**: Run `reconstructPar -time <extractionStartTime>` to reconstruct the initial time
+2. **Reconstruct fields**: Run `reconstructPar` for the timestep you want to start reconstruction from:
+   - For **linear interpolation**: `reconstructPar -time <t_1>` (second timestep)
+   - For **cubic interpolation**: `reconstructPar -time <t_2>` (third timestep, default)
 3. **Case setup**: Run `spaceTimeWindowInitCase -sourceCase <path>` to create subset mesh and initial fields
 4. **Reconstruction phase**: Run the solver on the subset case
 
@@ -37,17 +41,24 @@ The workflow is strictly sequential:
 # Example parallel workflow
 cd source-case
 mpirun -np 4 pimpleFoam -parallel    # Extraction happens automatically
+                                      # Forces writes at t_0, t_1, t_2
 
-# Reconstruct the extraction start time
-reconstructPar -time 0.0001          # Use actual extraction start time
+# Reconstruct the cubic-safe start time (t_2, default)
+reconstructPar -time 0.0002          # Use t_2 for cubic interpolation
 
-# Initialize the subset case
+# Initialize the subset case (with outlet for pressure relief)
 cd ../subset-case
-spaceTimeWindowInitCase -sourceCase ../source-case
+spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 
 # Run reconstruction (can be serial or parallel)
 pimpleFoam
 ```
+
+**Choosing the start time:**
+- **Cubic interpolation (default)**: Starts at t_2, uses 4 timesteps for smoother interpolation
+- **Linear interpolation**: Starts at t_1, uses 2 timesteps, simpler but less smooth
+
+To use linear interpolation, set `timeInterpolationScheme linear` in the boundary condition and ensure you reconstruct from t_1.
 
 ## Components
 
@@ -145,7 +156,10 @@ outputDir/
 - Boundary data from all processors is gathered to the master and written as a single file
 - Processor boundary faces (where the extraction boundary crosses processor boundaries) are handled automatically
 - Field interpolation correctly exchanges values between processors for faces on processor boundaries
-- **Automatic field write**: At extraction start time, the extractor forces the solver to write all fields to disk
+- **Automatic field writes**: The extractor forces the solver to write all fields to disk at multiple timesteps:
+  - **t_0** (extraction start): For boundary data and linear interpolation lookback
+  - **t_1** (second timestep): Where linear interpolation reconstruction can start
+  - **t_2** (third timestep): Where cubic interpolation reconstruction can start
 - **Mesh handling**: In parallel mode, only extraction box parameters are written (not the mesh)
 - `spaceTimeWindowInitCase` creates the subset mesh from the reconstructed source case, ensuring correct cell ordering
 
@@ -177,15 +191,24 @@ spaceTimeWindowInitCase -sourceCase ../ufr2-02
 
 # Or specify the extract directory explicitly
 spaceTimeWindowInitCase -sourceCase ../ufr2-02 -extractDir ./subset-case
+
+# Create an outlet patch at the downstream boundary (+x direction)
+spaceTimeWindowInitCase -sourceCase ../ufr2-02 -outletDirection "(1 0 0)"
+
+# Adjust outlet size (default 10% of box extent in outlet direction)
+spaceTimeWindowInitCase -sourceCase ../ufr2-02 -outletDirection "(1 0 0)" -outletFraction 0.15
 ```
 
 **Options:**
 
-| Option         | Description                                    | Required |
-|----------------|------------------------------------------------|----------|
-| -sourceCase    | Source case directory (where extraction ran)   | yes      |
-| -extractDir    | Directory with extracted data (default: cwd)   | no       |
-| -overwrite     | Overwrite existing files                       | no       |
+| Option           | Description                                      | Required |
+|------------------|--------------------------------------------------|----------|
+| -sourceCase      | Source case directory (where extraction ran)     | yes      |
+| -extractDir      | Directory with extracted data (default: cwd)     | no       |
+| -overwrite       | Overwrite existing files                         | no       |
+| -outletDirection | Normal direction for outlet patch (e.g., "(1 0 0)") | no    |
+| -outletFraction  | Fraction of box extent for outlet region (default: 0.1) | no |
+| -correctMassFlux | Apply least-squares mass flux correction to boundaryData velocity | no |
 
 **What it creates:**
 
@@ -206,6 +229,36 @@ When the extraction was done in parallel (detected by `extractionBox` file):
 - Creates subset mesh from the reconstructed source case using the extraction bounding box
 - Extracts initial fields from the source case at the extraction start time
 - Requires that `reconstructPar -time <startTime>` was run on the source case first
+
+**Outlet Patch Creation:**
+
+The `-outletDirection` option creates an outlet patch for pressure relief. This is important because:
+- The `oldInternalFaces` patch applies Dirichlet (fixed value) velocity BCs from the extracted data
+- Without an outlet, incompressible solvers can experience pressure buildup
+- The outlet allows `adjustPhi` to correct any mass flux imbalance
+
+How it works:
+1. Faces on the extraction boundary are classified based on their position in the outlet direction
+2. Faces within `outletFraction` of the maximum extent become the `outlet` patch
+3. Remaining faces stay in `oldInternalFaces` with `spaceTimeWindow` BC
+4. BoundaryData is automatically updated to remove outlet faces from the field data
+
+Example: For flow in the +x direction, use `-outletDirection "(1 0 0)"`:
+```
+                    outlet (10% of downstream boundary)
+                    +---------+
+                    |         |
+    +---------------+---------+
+    |                         |
+    | oldInternalFaces        |  --> flow direction (+x)
+    | (spaceTimeWindow BC)    |
+    +-------------------------+
+```
+
+The outlet patch is configured with:
+- **U**: `inletOutlet` BC (allows outflow, prevents backflow)
+- **p**: `zeroGradient` BC (pressure relief)
+- **Scalars (nut, k, etc.)**: `zeroGradient` BC
 
 **After running:**
 ```bash
@@ -306,7 +359,7 @@ For turbulent LES simulations with significant temporal fluctuations, `cubic` in
 
 ### Flux Reporting
 
-The `reportFlux` option enables diagnostic output showing the net mass flux through the `oldInternalFaces` patch at each timestep. This is useful for verifying mass conservation.
+The `reportFlux` option enables diagnostic output showing the net mass flux through the `oldInternalFaces` patch at each timestep. This is useful for verifying mass conservation and understanding `adjustPhi` behavior.
 
 ```cpp
 oldInternalFaces
@@ -321,15 +374,26 @@ oldInternalFaces
 
 **Output example:**
 ```
-spaceTimeWindow flux report [oldInternalFaces] t=0.001 fixesValue=true netFlux=1.234e-06 (in=-0.0523 out=0.0523)
+spaceTimeWindow flux [oldInternalFaces] t=0.001 thisPatch=1.234e-06 (in=-0.0523 out=0.0523) | MESH TOTAL=5.678e-05 (fixed=-0.0523 adjustable=0.0523) | adjustPhi will correct: -5.678e-05
 ```
 
-- **netFlux**: Total net flux through patch (should be ~0 for mass conservation)
-- **in**: Sum of inward fluxes (negative values, into domain)
-- **out**: Sum of outward fluxes (positive values, out of domain)
-- **fixesValue**: Shows whether `adjustPhi()` will modify this patch's flux
+The output provides a comprehensive view of flux balance:
 
-When `fixesValue=true`, `adjustPhi()` treats the patch as fixed and won't correct its flux - any imbalance is absorbed by other patches (typically outlets). When `fixesValue=false`, `adjustPhi()` can adjust the flux on this patch to enforce global mass conservation.
+| Field | Description |
+|-------|-------------|
+| `thisPatch` | Net flux through this spaceTimeWindow patch |
+| `in` | Sum of inward fluxes (into the domain) |
+| `out` | Sum of outward fluxes (out of the domain) |
+| `MESH TOTAL` | Total net flux across ALL boundary patches |
+| `fixed` | Flux from patches with `fixesValue=true` (not corrected by adjustPhi) |
+| `adjustable` | Flux from patches with `fixesValue=false` (will be corrected) |
+| `adjustPhi will correct` | The correction that adjustPhi will distribute across adjustable patches |
+
+**Understanding the output:**
+- A non-zero `MESH TOTAL` indicates a global mass imbalance
+- `adjustPhi` corrects this imbalance by distributing `-MESH TOTAL` across adjustable patches
+- With outlet patches (`fixesValue=false`), the imbalance flows out through the outlet
+- Without outlets, all patches have `fixesValue=true` and adjustPhi cannot correct the imbalance
 
 **Note:** `reportFlux` only produces output for vector fields (i.e., velocity U).
 
@@ -351,7 +415,122 @@ The `fixesValue` option controls how `adjustPhi()` handles flux correction on th
 - The correction is distributed across all faces of this patch
 - Use when: You want `adjustPhi()` to heal/repair mass imbalance caused by face interpolation
 
-**Recommendation:** For LES reconstruction where accurate inflow physics matter, `fixesValue = false` may be preferable as it distributes the mass correction uniformly across the `oldInternalFaces` rather than dumping it all on the outlet.
+### Recommended Configuration with Outlet
+
+When using `-outletDirection` to create an outlet patch, the recommended configuration is:
+
+```cpp
+// oldInternalFaces - preserve exact extracted values
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    fixesValue      true;    // Don't modify extracted values
+    reportFlux      true;    // Monitor flux for debugging
+    ...
+}
+
+// outlet - allows adjustPhi to correct mass imbalance
+outlet
+{
+    type            inletOutlet;
+    inletValue      uniform (0 0 0);
+    value           uniform (0 0 0);
+    // fixesValue defaults to false for inletOutlet
+}
+```
+
+This configuration:
+1. Preserves the physically accurate extracted boundary values on `oldInternalFaces`
+2. Allows any mass imbalance to flow out through the outlet
+3. Prevents pressure buildup in incompressible simulations
+
+**Without an outlet:** If all boundary patches have `fixesValue=true`, `adjustPhi()` cannot correct mass imbalances. This may cause pressure solver issues or numerical instability. Consider using `fixesValue=false` on `oldInternalFaces` to distribute the correction uniformly.
+
+### Mass Flux Correction (`-correctMassFlux`)
+
+The `-correctMassFlux` option applies a least-squares correction to ensure the extracted velocity field is exactly mass-conservative at every timestep. This prevents pressure solver issues in the reconstruction simulation.
+
+**Why it's needed:**
+- Face interpolation during extraction can introduce small mass imbalances
+- When all boundaries have `fixesValue=true`, `adjustPhi()` cannot correct imbalances
+- Even with an outlet, exact mass conservation at the spaceTimeWindow boundary is preferred
+
+**How it works:**
+
+The correction minimizes ||U_corrected - U||² subject to the constraint Σ(U_corrected · Sf) = 0:
+
+```
+U_corrected = U - (imbalance / totalSfMag) * n
+```
+
+Where:
+- `imbalance = Σ(U · Sf)` is the current net mass flux
+- `totalSfMag = Σ|Sf|` is the total face area magnitude
+- `n = Sf / |Sf|` is the face normal vector
+
+This distributes the correction uniformly across all faces proportional to their area.
+
+**Usage:**
+
+```bash
+# Apply mass flux correction (recommended when not using outlet)
+spaceTimeWindowInitCase -sourceCase ../source-case -correctMassFlux
+
+# Can be combined with outlet creation
+spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)" -correctMassFlux
+```
+
+**Output:**
+```
+Applying mass flux correction to boundaryData...
+    Total face area magnitude: 0.456789
+    Processing timestep 0.0001: imbalance 1.234e-06 -> 0.000e+00 (correction: -2.702e-06 per unit area)
+    Processing timestep 0.0002: imbalance -5.678e-07 -> 0.000e+00 (correction: 1.243e-06 per unit area)
+    ...
+    Mass flux correction complete:
+        Max imbalance before: 3.456e-06
+        Max imbalance after:  0.000e+00 (machine precision)
+        Avg imbalance before: 1.234e-06
+```
+
+**Note:** The correction is applied to boundaryData files BEFORE outlet faces are removed (if using `-outletDirection`). This ensures consistent treatment regardless of outlet configuration.
+
+### Recommended Configurations
+
+Choose based on your requirements:
+
+**Option 1: Mass flux correction only (cleanest, no outlet)**
+```bash
+spaceTimeWindowInitCase -sourceCase ../source -correctMassFlux
+```
+- BoundaryData is exactly mass-conservative
+- Use `fixesValue true` (default) on `oldInternalFaces`
+- `adjustPhi` sees zero imbalance, no correction needed
+- Best for: Maximum fidelity to extracted data
+
+**Option 2: Outlet with mass flux correction (recommended for safety)**
+```bash
+spaceTimeWindowInitCase -sourceCase ../source -outletDirection "(1 0 0)" -correctMassFlux
+```
+- BoundaryData is mass-conservative
+- Outlet provides pressure relief for any residual numerical errors
+- Best for: Production runs where robustness is important
+
+**Option 3: Outlet only (relies on adjustPhi)**
+```bash
+spaceTimeWindowInitCase -sourceCase ../source -outletDirection "(1 0 0)"
+```
+- Small mass imbalances from face interpolation remain
+- `adjustPhi` pushes imbalance through outlet at each timestep
+- Best for: Quick setup, acceptable small flux modifications
+
+**Option 4: No outlet, no correction (advanced)**
+```bash
+spaceTimeWindowInitCase -sourceCase ../source
+```
+- Use `fixesValue false` on `oldInternalFaces` to allow `adjustPhi` correction
+- Imbalance distributed across all boundary faces
+- Best for: When uniform correction is preferred over outlet
 
 ## Boundary Data Compression
 

@@ -20,6 +20,7 @@ License
 #include "IOstreamOption.H"
 #include "deltaVarintCodec.H"
 #include "pTraits.H"
+#include "volFields.H"
 #include <type_traits>
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
@@ -567,13 +568,9 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
             << exit(FatalIOError);
     }
 
-    if (dict.found("value"))
-    {
-        fvPatchField<Type>::operator=
-        (
-            Field<Type>("value", dict, p.size())
-        );
-    }
+    // Note: value is already read by parent fixedValueFvPatchField constructor
+    // with IOobjectOption::MUST_READ - do NOT read it again here as compound
+    // tokens can only be transferred once
 }
 
 
@@ -832,22 +829,54 @@ void Foam::spaceTimeWindowFvPatchField<Type>::updateCoeffs()
     }
 
     // Report flux through patch (vector fields only, i.e., velocity)
+    // This reports BEFORE adjustPhi, showing the BC's prescribed flux contribution
+    // and the total mesh flux imbalance that adjustPhi will need to correct
     if (reportFlux_)
     {
         if constexpr (std::is_same_v<Type, vector>)
         {
-            // Compute flux: phi = U & Sf (face area vector)
+            // Compute flux through this patch: phi = U & Sf (face area vector)
             const vectorField& Sf = this->patch().Sf();
             const scalarField flux(patchValues & Sf);
-            const scalar netFlux = gSum(flux);
-            const scalar inFlux = gSum(neg(flux) * flux);   // negative = into domain
-            const scalar outFlux = gSum(pos(flux) * flux);  // positive = out of domain
+            const scalar thisNetFlux = gSum(flux);
+            const scalar thisInFlux = gSum(neg(flux) * flux);   // negative = into domain
+            const scalar thisOutFlux = gSum(pos(flux) * flux);  // positive = out of domain
 
-            Info<< "spaceTimeWindow flux report [" << this->patch().name() << "]"
+            // Compute total mesh flux from ALL boundary patches
+            // This shows the imbalance that adjustPhi will correct
+            const fvMesh& mesh = this->patch().boundaryMesh().mesh();
+            const volVectorField& U =
+                mesh.template lookupObject<volVectorField>(this->internalField().name());
+
+            scalar totalMeshFlux = 0;
+            scalar fixedFlux = 0;      // Flux from patches where fixesValue=true
+            scalar adjustableFlux = 0; // Flux from patches where fixesValue=false
+
+            forAll(U.boundaryField(), patchi)
+            {
+                const fvPatchVectorField& Up = U.boundaryField()[patchi];
+                const vectorField& pSf = Up.patch().Sf();
+                const scalar patchFlux = gSum(Up & pSf);
+                totalMeshFlux += patchFlux;
+
+                if (Up.fixesValue())
+                {
+                    fixedFlux += patchFlux;
+                }
+                else
+                {
+                    adjustableFlux += patchFlux;
+                }
+            }
+
+            Info<< "spaceTimeWindow flux [" << this->patch().name() << "]"
                 << " t=" << this->db().time().value()
-                << " fixesValue=" << (fixesValue_ ? "true" : "false")
-                << " netFlux=" << netFlux
-                << " (in=" << inFlux << " out=" << outFlux << ")"
+                << " thisPatch=" << thisNetFlux
+                << " (in=" << thisInFlux << " out=" << thisOutFlux << ")"
+                << " | MESH TOTAL=" << totalMeshFlux
+                << " (fixed=" << fixedFlux
+                << " adjustable=" << adjustableFlux << ")"
+                << " | adjustPhi will correct: " << -totalMeshFlux
                 << endl;
         }
     }

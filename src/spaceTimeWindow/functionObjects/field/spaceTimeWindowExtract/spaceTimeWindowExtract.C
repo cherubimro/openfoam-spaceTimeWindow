@@ -14,6 +14,7 @@ License
 #include "spaceTimeWindowExtract.H"
 #include "addToRunTimeSelectionTable.H"
 #include "fvMeshSubset.H"
+#include "fvSolution.H"
 #include "OFstream.H"
 #include "Time.H"
 #include "surfaceFields.H"
@@ -1022,6 +1023,12 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeSubsetMesh()
             os.writeEntry("boxMin", boxMin_);
             os.writeEntry("boxMax", boxMax_);
 
+            // Write pRefPoint at center of extraction box
+            // This ensures consistent pressure reference between source and reconstruction
+            point pRefPoint = 0.5 * (boxMin_ + boxMax_);
+            os << nl << "// Pressure reference point (center of extraction box)" << nl;
+            os.writeEntry("pRefPoint", pRefPoint);
+
             // Parallel info
             if (Pstream::parRun())
             {
@@ -1080,6 +1087,11 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
         return;
     }
 
+    // Serial mode: write initial fields at t_2 (cubic-safe start time)
+    // This function is called from execute() ONLY when timestepCount_ == 2.
+    // The reconstruction starts at t_2 because cubic interpolation needs
+    // t_0 and t_1 as lookback buffer.
+
     // Serial mode: write initial fields from subset mesh
     if (!meshSubsetPtr_)
     {
@@ -1090,13 +1102,13 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
 
     const fvMesh& subMesh = meshSubsetPtr_->subMesh();
 
-    // Create time directory
+    // Create time directory at the cubic-safe start time (t_2)
     const word timeName = mesh_.time().timeName();
     fileName timeDir = outputDir_ / timeName;
     mkDir(timeDir);
 
-    Info<< type() << " " << name() << ": Writing initial fields to "
-        << timeDir << endl;
+    Info<< type() << " " << name() << ": Writing initial fields at t_2 ("
+        << timeName << ") for cubic-safe reconstruction start" << endl;
 
     for (const word& fieldName : fieldNames_)
     {
@@ -1601,6 +1613,7 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     remoteCellProcs_(),
     hasProcessorBoundaryFaces_(false),
     timestepCount_(0),
+    t1Written_(false),
     t2Written_(false)
 {
     read(dict);
@@ -1617,6 +1630,61 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     Tuple2<point, point> boxDef = dict.get<Tuple2<point, point>>("box");
     boxMin_ = boxDef.first();
     boxMax_ = boxDef.second();
+
+    // Enforce pRefPoint at center of extraction box in source simulation
+    // This must be done early (in read()) before the pressure solver uses fvSolution
+    {
+        point pRefPoint = 0.5 * (boxMin_ + boxMax_);
+
+        // Get non-const reference to the solution dictionary
+        // The fvMesh stores fvSolution internally, we access it through solutionDict()
+        // and cast away const (safe because we're modifying in-memory only)
+        dictionary& solnDict = const_cast<dictionary&>(mesh_.solutionDict());
+
+        // Try PIMPLE first, then SIMPLE
+        wordList solverTypes{"PIMPLE", "SIMPLE"};
+        bool found = false;
+
+        for (const word& solverType : solverTypes)
+        {
+            if (solnDict.found(solverType))
+            {
+                dictionary& solverSubDict = solnDict.subDict(solverType);
+
+                // Check if pRefPoint already exists
+                point existingPRefPoint(Zero);
+                if (solverSubDict.readIfPresent("pRefPoint", existingPRefPoint))
+                {
+                    // Warn if existing pRefPoint differs
+                    if (mag(existingPRefPoint - pRefPoint) > SMALL)
+                    {
+                        WarningInFunction
+                            << "Overriding existing pRefPoint " << existingPRefPoint
+                            << " with extraction box center " << pRefPoint << endl;
+                    }
+                }
+
+                // Set/override pRefPoint and pRefValue
+                solverSubDict.set("pRefPoint", pRefPoint);
+                solverSubDict.set("pRefValue", scalar(0));
+
+                Info<< type() << " " << name()
+                    << ": ENFORCED pRefPoint = " << pRefPoint
+                    << " (center of extraction box) in " << solverType << endl;
+
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            WarningInFunction
+                << "Could not find PIMPLE or SIMPLE in fvSolution to set pRefPoint" << nl
+                << "Pressure reference may be inconsistent between source and reconstruction"
+                << endl;
+        }
+    }
 
     dict.readEntry("outputDir", outputDir_);
     dict.readEntry("fields", fieldNames_);
@@ -1770,12 +1838,42 @@ bool Foam::functionObjects::spaceTimeWindowExtract::execute()
         }
 
         writeSubsetMesh();
+        // NOTE: writeInitialFields() is called at t_2 below, not here at t_0
+    }
+
+    // Write initial fields at t_2 (cubic-safe start time)
+    // The reconstruction starts at t_2 because cubic interpolation needs
+    // t_0 and t_1 as lookback buffer. We call writeInitialFields() only at t_2.
+    if (timestepCount_ == 2)
+    {
         writeInitialFields();
     }
 
     // Write boundary data at EVERY timestep (not just write intervals)
     // This is critical - the spaceTimeWindow BC needs data at every timestep
     writeBoundaryData();
+
+    // Force write at t_1 (second timestep, index 1) for linear interpolation
+    // Linear interpolation only requires t_0 as lookback buffer, so the
+    // reconstruction case can start at t_1 if using linear interp.
+    if (!t1Written_ && timestepCount_ == 1)
+    {
+        Info<< type() << " " << name()
+            << ": Forcing field write at t_1 (linear interp start time) "
+            << mesh_.time().timeName() << endl;
+
+        const_cast<Time&>(mesh_.time()).writeNow();
+
+        if (Pstream::parRun())
+        {
+            UPstream::barrier(UPstream::worldComm);
+        }
+
+        Info<< "    Field write complete (t_1). For linear interpolation, "
+            << "run reconstructPar -time " << mesh_.time().timeName() << endl;
+
+        t1Written_ = true;
+    }
 
     // Force write at t_2 (third timestep, index 2) for spaceTimeWindowInitCase
     // Cubic interpolation requires t_0 and t_1 as lookback buffer, so the

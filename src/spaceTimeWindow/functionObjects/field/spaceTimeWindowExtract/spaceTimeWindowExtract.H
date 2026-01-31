@@ -195,7 +195,10 @@ protected:
         //- Counter for timesteps since extraction started
         label timestepCount_;
 
-        //- Whether t_2 (third timestep) has been written to disk
+        //- Whether t_1 (second timestep) has been written to disk (for linear interp)
+        bool t1Written_;
+
+        //- Whether t_2 (third timestep) has been written to disk (for cubic interp)
         bool t2Written_;
 
 

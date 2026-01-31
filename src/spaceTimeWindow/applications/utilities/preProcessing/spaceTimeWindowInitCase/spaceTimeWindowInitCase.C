@@ -33,6 +33,11 @@ Usage
         -sourceCase <dir>   Source case directory (where extraction ran)
         -extractDir <dir>   Directory containing extracted data (default: current dir)
         -overwrite          Overwrite existing files
+        -outletDirection <vector>  Normal direction for outlet patch (e.g., "(1 0 0)")
+        -outletFraction <scalar>   Fraction of box face to use as outlet (default: 0.1)
+
+    The outlet patch provides a pressure relief for incompressible solvers.
+    Without an outlet, the all-Dirichlet velocity BC can cause pressure buildup.
 
 \*---------------------------------------------------------------------------*/
 
@@ -42,6 +47,7 @@ Usage
 #include "fvMeshSubset.H"
 #include "IOdictionary.H"
 #include "IFstream.H"
+#include "IStringStream.H"
 #include "OFstream.H"
 #include "volFields.H"
 #include "surfaceFields.H"
@@ -576,6 +582,157 @@ void writeInitialField
 }
 
 
+// Correct velocity field for exact mass conservation using least-squares approach
+// The correction is: U_corrected = U - (imbalance / totalSfMag) * n
+// where n is the face normal (Sf / |Sf|)
+// This minimizes sum(|U_corrected - U|^2) subject to sum(U_corrected . Sf) = 0
+void correctMassFluxInBoundaryData
+(
+    const fileName& patchBoundaryDir,
+    const DynamicList<Tuple2<scalar, word>>& timeList,
+    const vectorField& faceSf  // Face area vectors (Sf)
+)
+{
+    Info<< nl << "Applying mass flux correction to boundaryData..." << endl;
+
+    // Compute total face area magnitude for normalization
+    scalar totalSfMag = 0;
+    forAll(faceSf, facei)
+    {
+        totalSfMag += mag(faceSf[facei]);
+    }
+
+    if (totalSfMag < SMALL)
+    {
+        WarningInFunction
+            << "Total face area is zero, skipping mass flux correction" << endl;
+        return;
+    }
+
+    // Statistics tracking
+    scalar maxImbalanceBefore = 0;
+    scalar maxImbalanceAfter = 0;
+    scalar sumImbalanceBefore = 0;
+    label nTimesteps = 0;
+
+    // Process each time directory
+    for (const auto& timePair : timeList)
+    {
+        const word& timeName = timePair.second();
+        fileName timeDir = patchBoundaryDir / timeName;
+
+        // Look for velocity field (U or U.dvz)
+        fileName velocityPath;
+        word velocityFileName;
+
+        if (isFile(timeDir / "U"))
+        {
+            velocityPath = timeDir / "U";
+            velocityFileName = "U";
+        }
+        else
+        {
+            // No velocity field in this timestep (unusual but possible)
+            continue;
+        }
+
+        // Read the velocity field
+        std::ifstream ifs(velocityPath.c_str());
+        std::string content((std::istreambuf_iterator<char>(ifs)),
+                           std::istreambuf_iterator<char>());
+        ifs.close();
+
+        // Find the data section after the FoamFile header
+        std::size_t headerEnd = content.find('}');
+        if (headerEnd == std::string::npos)
+        {
+            WarningInFunction
+                << "Cannot find FoamFile header end in " << velocityPath << nl
+                << "    Skipping..." << endl;
+            continue;
+        }
+
+        // Parse the velocity field
+        std::string dataSection = content.substr(headerEnd + 1);
+        IStringStream fieldIs(dataSection);
+        vectorField U(fieldIs);
+
+        if (U.size() != faceSf.size())
+        {
+            WarningInFunction
+                << "Velocity field size " << U.size()
+                << " doesn't match face count " << faceSf.size() << nl
+                << "    Skipping timestep " << timeName << endl;
+            continue;
+        }
+
+        // Compute current mass flux imbalance: sum(U . Sf)
+        scalar imbalance = 0;
+        forAll(U, facei)
+        {
+            imbalance += (U[facei] & faceSf[facei]);
+        }
+
+        // Track statistics
+        maxImbalanceBefore = max(maxImbalanceBefore, mag(imbalance));
+        sumImbalanceBefore += mag(imbalance);
+        nTimesteps++;
+
+        // Apply correction: U_corrected = U - (imbalance / totalSfMag) * n
+        // where n = Sf / |Sf| is the unit face normal
+        // This distributes the correction uniformly by face area
+        vectorField U_corrected(U.size());
+        forAll(U, facei)
+        {
+            scalar sfMag = mag(faceSf[facei]);
+            if (sfMag > SMALL)
+            {
+                vector n = faceSf[facei] / sfMag;
+                U_corrected[facei] = U[facei] - (imbalance / totalSfMag) * n;
+            }
+            else
+            {
+                U_corrected[facei] = U[facei];
+            }
+        }
+
+        // Verify correction (should be ~0)
+        scalar imbalanceAfter = 0;
+        forAll(U_corrected, facei)
+        {
+            imbalanceAfter += (U_corrected[facei] & faceSf[facei]);
+        }
+        maxImbalanceAfter = max(maxImbalanceAfter, mag(imbalanceAfter));
+
+        // Write corrected velocity field
+        OFstream os(velocityPath);
+        os  << "FoamFile" << nl
+            << "{" << nl
+            << "    version     2.0;" << nl
+            << "    format      ascii;" << nl
+            << "    class       vectorField;" << nl
+            << "    object      U;" << nl
+            << "}" << nl << nl;
+        os << U_corrected;
+    }
+
+    // Report statistics
+    if (nTimesteps > 0)
+    {
+        Info<< "    Processed " << nTimesteps << " timesteps" << nl
+            << "    Max imbalance before: " << maxImbalanceBefore << nl
+            << "    Max imbalance after:  " << maxImbalanceAfter << nl
+            << "    Avg imbalance before: " << sumImbalanceBefore / nTimesteps << nl
+            << "    Correction formula: U_corrected = U - (imbalance/totalSfMag) * n" << endl;
+    }
+    else
+    {
+        WarningInFunction
+            << "No velocity fields found in boundaryData" << endl;
+    }
+}
+
+
 int main(int argc, char *argv[])
 {
     argList::addNote
@@ -603,6 +760,26 @@ int main(int argc, char *argv[])
         "Overwrite existing files"
     );
 
+    argList::addOption
+    (
+        "outletDirection",
+        "vector",
+        "Normal direction for outlet patch (e.g., \"(1 0 0)\" for +x)"
+    );
+
+    argList::addOption
+    (
+        "outletFraction",
+        "scalar",
+        "Fraction of box extent for outlet region (default: 0.1)"
+    );
+
+    argList::addBoolOption
+    (
+        "correctMassFlux",
+        "Apply least-squares mass flux correction to boundaryData velocity"
+    );
+
     argList::noParallel();
     argList::noFunctionObjects();
 
@@ -620,10 +797,36 @@ int main(int argc, char *argv[])
     fileName extractDir = args.getOrDefault<fileName>("extractDir", args.path());
     bool overwrite = args.found("overwrite");
 
+    // Outlet configuration
+    vector outletDirection = Zero;
+    scalar outletFraction = 0.1;
+    bool createOutlet = false;
+
+    if (args.found("outletDirection"))
+    {
+        outletDirection = args.get<vector>("outletDirection");
+        outletDirection /= mag(outletDirection) + SMALL;  // Normalize
+        createOutlet = true;
+        outletFraction = args.getOrDefault<scalar>("outletFraction", 0.1);
+    }
+
+    // Mass flux correction option
+    bool correctMassFlux = args.found("correctMassFlux");
+
     Info<< "spaceTimeWindowInitCase" << nl
         << "    Source case:    " << sourceCase << nl
-        << "    Extract dir:    " << extractDir << nl
-        << endl;
+        << "    Extract dir:    " << extractDir << nl;
+
+    if (createOutlet)
+    {
+        Info<< "    Outlet direction: " << outletDirection << nl
+            << "    Outlet fraction:  " << outletFraction << nl;
+    }
+    if (correctMassFlux)
+    {
+        Info<< "    Mass flux correction: enabled" << nl;
+    }
+    Info<< endl;
 
     // Verify source case exists
     if (!isDir(sourceCase))
@@ -838,8 +1041,65 @@ int main(int argc, char *argv[])
 
     // 2. Copy system files
     copyFile(sourceCase / "system" / "fvSchemes", extractDir / "system" / "fvSchemes");
-    copyFile(sourceCase / "system" / "fvSolution", extractDir / "system" / "fvSolution");
     copyFile(sourceCase / "system" / "decomposeParDict", extractDir / "system" / "decomposeParDict");
+
+    // Copy and modify fvSolution to add pRefPoint at center of extraction box
+    {
+        fileName srcFvSolution = sourceCase / "system" / "fvSolution";
+        fileName dstFvSolution = extractDir / "system" / "fvSolution";
+
+        if (isFile(srcFvSolution))
+        {
+            // Read source fvSolution
+            IFstream srcIs(srcFvSolution);
+            dictionary fvSolutionDict(srcIs);
+
+            // Get pRefPoint from metadata (center of extraction box)
+            vector pRefPoint = metadata.getOrDefault<vector>
+            (
+                "pRefPoint",
+                0.5 * (metadata.get<vector>("boxMin") + metadata.get<vector>("boxMax"))
+            );
+
+            // Add pRefPoint to PIMPLE subdictionary (most common for incompressible)
+            if (fvSolutionDict.found("PIMPLE"))
+            {
+                dictionary& pimpleDict = fvSolutionDict.subDict("PIMPLE");
+                pimpleDict.set("pRefPoint", pRefPoint);
+                pimpleDict.set("pRefValue", 0);
+            }
+            // Also check for SIMPLE
+            if (fvSolutionDict.found("SIMPLE"))
+            {
+                dictionary& simpleDict = fvSolutionDict.subDict("SIMPLE");
+                simpleDict.set("pRefPoint", pRefPoint);
+                simpleDict.set("pRefValue", 0);
+            }
+
+            // Write modified fvSolution
+            OFstream dstOs(dstFvSolution);
+            dstOs << "FoamFile" << nl
+                  << "{" << nl
+                  << "    version     2.0;" << nl
+                  << "    format      ascii;" << nl
+                  << "    class       dictionary;" << nl
+                  << "    object      fvSolution;" << nl
+                  << "}" << nl
+                  << "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //" << nl
+                  << "// Modified by spaceTimeWindowInitCase - added pRefPoint" << nl
+                  << "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //" << nl
+                  << nl;
+            fvSolutionDict.write(dstOs, false);
+
+            Info<< "    Copied and modified: fvSolution" << nl
+                << "        pRefPoint = " << pRefPoint << endl;
+        }
+        else
+        {
+            WarningInFunction
+                << "Source file not found: " << srcFvSolution << endl;
+        }
+    }
 
     // 3. Copy constant files (mandatory for physical fidelity)
     Info<< nl << "Copying constant files (mandatory for fidelity)..." << endl;
@@ -983,28 +1243,369 @@ int main(int argc, char *argv[])
             os << pm.faceNeighbour();
         }
 
-        // Boundary - write only oldInternalFaces patch
+        // Boundary - write oldInternalFaces and optionally outlet patch
+        // If createOutlet is true, identify outlet faces and split the patch
+        // Declare face lists outside the block so they can be used for field extraction
+        labelList outletFaceIndices;
+        labelList inletFaceIndices;
         {
-            OFstream os(meshDir / "boundary");
-            writeHeader(os, "polyBoundaryMesh", "boundary");
-
             const polyBoundaryMesh& bm = pm.boundaryMesh();
+            label oldInternalPatchI = -1;
 
-            os << "1" << nl << "(" << nl;
             forAll(bm, patchi)
             {
                 if (bm[patchi].name() == "oldInternalFaces")
                 {
-                    os << "    oldInternalFaces" << nl
-                       << "    {" << nl
-                       << "        type            patch;" << nl
-                       << "        nFaces          " << bm[patchi].size() << ";" << nl
-                       << "        startFace       " << pm.nInternalFaces() << ";" << nl
-                       << "    }" << nl;
+                    oldInternalPatchI = patchi;
                     break;
                 }
             }
-            os << ")" << nl;
+
+            if (oldInternalPatchI < 0)
+            {
+                FatalErrorInFunction
+                    << "oldInternalFaces patch not found in subset mesh" << nl
+                    << exit(FatalError);
+            }
+
+            const polyPatch& oifPatch = bm[oldInternalPatchI];
+            label nTotalBndFaces = oifPatch.size();
+            label startFace = pm.nInternalFaces();
+
+            if (createOutlet)
+            {
+                // Calculate threshold position for outlet
+                // Outlet faces are those with face centre in the direction of outletDirection
+                // within outletFraction of the box extent
+
+                const vectorField& faceCentres = pm.faceCentres();
+
+                // Find extent of patch faces in outlet direction
+                scalar minProj = GREAT;
+                scalar maxProj = -GREAT;
+
+                for (label i = 0; i < nTotalBndFaces; ++i)
+                {
+                    label facei = startFace + i;
+                    scalar proj = faceCentres[facei] & outletDirection;
+                    minProj = min(minProj, proj);
+                    maxProj = max(maxProj, proj);
+                }
+
+                // Outlet threshold: faces in top outletFraction of extent
+                scalar extent = maxProj - minProj;
+                scalar outletThreshold = maxProj - outletFraction * extent;
+
+                Info<< "    Outlet identification:" << nl
+                    << "        Direction: " << outletDirection << nl
+                    << "        Extent range: " << minProj << " to " << maxProj << nl
+                    << "        Outlet threshold: > " << outletThreshold << endl;
+
+                // Classify faces
+                for (label i = 0; i < nTotalBndFaces; ++i)
+                {
+                    label facei = startFace + i;
+                    scalar proj = faceCentres[facei] & outletDirection;
+
+                    if (proj >= outletThreshold)
+                    {
+                        outletFaceIndices.append(i);
+                    }
+                    else
+                    {
+                        inletFaceIndices.append(i);
+                    }
+                }
+
+                Info<< "        oldInternalFaces: " << inletFaceIndices.size() << " faces" << nl
+                    << "        outlet: " << outletFaceIndices.size() << " faces" << endl;
+            }
+            else
+            {
+                // No outlet - all faces are oldInternalFaces
+                for (label i = 0; i < nTotalBndFaces; ++i)
+                {
+                    inletFaceIndices.append(i);
+                }
+            }
+
+            // If we have outlet faces, we need to reorder the mesh faces
+            // so that oldInternalFaces come first, then outlet faces
+            if (outletFaceIndices.size() > 0)
+            {
+                // Build reordering map: new face index -> old face index
+                labelList faceOrder(nTotalBndFaces);
+                label newIdx = 0;
+
+                // First: oldInternalFaces (inlet)
+                for (label oldIdx : inletFaceIndices)
+                {
+                    faceOrder[newIdx++] = oldIdx;
+                }
+
+                // Then: outlet faces
+                for (label oldIdx : outletFaceIndices)
+                {
+                    faceOrder[newIdx++] = oldIdx;
+                }
+
+                // Build inverse map for field reordering
+                labelList invFaceOrder(nTotalBndFaces);
+                forAll(faceOrder, newi)
+                {
+                    invFaceOrder[faceOrder[newi]] = newi;
+                }
+
+                // Reorder faces - need to rewrite the faces file with reordered boundary faces
+                faceList allFaces = pm.faces();
+                labelList allOwner = pm.faceOwner();
+
+                faceList reorderedFaces(allFaces.size());
+                labelList reorderedOwner(allOwner.size());
+
+                // Copy internal faces unchanged
+                for (label i = 0; i < startFace; ++i)
+                {
+                    reorderedFaces[i] = allFaces[i];
+                    reorderedOwner[i] = allOwner[i];
+                }
+
+                // Copy boundary faces in new order
+                for (label newi = 0; newi < nTotalBndFaces; ++newi)
+                {
+                    label oldi = faceOrder[newi];
+                    reorderedFaces[startFace + newi] = allFaces[startFace + oldi];
+                    reorderedOwner[startFace + newi] = allOwner[startFace + oldi];
+                }
+
+                // Write reordered faces
+                {
+                    OFstream os(meshDir / "faces");
+                    writeHeader(os, "faceList", "faces");
+                    os << reorderedFaces;
+                }
+
+                // Write reordered owner
+                {
+                    OFstream os(meshDir / "owner");
+                    writeHeader(os, "labelList", "owner");
+                    os << reorderedOwner;
+                }
+
+                // Write boundary with two patches
+                {
+                    OFstream os(meshDir / "boundary");
+                    writeHeader(os, "polyBoundaryMesh", "boundary");
+
+                    os << "2" << nl << "(" << nl;
+
+                    // oldInternalFaces patch
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl
+                       << "        type            patch;" << nl
+                       << "        nFaces          " << inletFaceIndices.size() << ";" << nl
+                       << "        startFace       " << startFace << ";" << nl
+                       << "    }" << nl;
+
+                    // outlet patch
+                    os << "    outlet" << nl
+                       << "    {" << nl
+                       << "        type            patch;" << nl
+                       << "        nFaces          " << outletFaceIndices.size() << ";" << nl
+                       << "        startFace       " << startFace + inletFaceIndices.size() << ";" << nl
+                       << "    }" << nl;
+
+                    os << ")" << nl;
+                }
+
+                // Store reordering info for field update
+                // Write to a file so we can use it later when updating fields
+                {
+                    OFstream os(meshDir / "outletFaceReorder");
+                    writeHeader(os, "labelList", "outletFaceReorder");
+                    os << "// Maps new boundary face index to old boundary face index" << nl;
+                    os << "// Use this to reorder boundary field values" << nl;
+                    os << faceOrder;
+                }
+
+                // Update boundaryData to match new patch size (remove outlet faces)
+                // The original boundaryData has data for all faces, but now
+                // oldInternalFaces only has inletFaceIndices.size() faces
+                Info<< nl << "    Updating boundaryData to match split patch..." << endl;
+
+                // Process each time directory in boundaryData
+                for (const auto& timePair : timeList)
+                {
+                    const word& timeName = timePair.second();
+                    fileName timeDir = patchBoundaryDir / timeName;
+
+                    // Get all field files in this time directory
+                    fileNameList fieldFiles = readDir(timeDir, fileName::FILE);
+
+                    for (const fileName& fieldFile : fieldFiles)
+                    {
+                        // Skip metadata
+                        if (fieldFile == "extractionMetadata")
+                        {
+                            continue;
+                        }
+
+                        fileName fieldPath = timeDir / fieldFile;
+
+                        // Read the file content to determine field type and read data
+                        std::ifstream ifs(fieldPath.c_str());
+                        std::string content((std::istreambuf_iterator<char>(ifs)),
+                                           std::istreambuf_iterator<char>());
+                        ifs.close();
+
+                        // Find the data section after the FoamFile header
+                        // Look for the closing brace of FoamFile, then find the size
+                        std::size_t headerEnd = content.find('}');
+                        if (headerEnd == std::string::npos)
+                        {
+                            WarningInFunction
+                                << "Cannot find FoamFile header end in " << fieldFile << nl
+                                << "    Skipping..." << endl;
+                            continue;
+                        }
+
+                        // Check if it's a vector field by looking at data format
+                        // Vectors have ((x y z) format after the size
+                        // Or look for "vectorField" class
+                        bool isVector = (content.find("vectorField") != std::string::npos
+                                      || content.find("Field<vector>") != std::string::npos);
+
+                        // If class is just "Field", check the data pattern
+                        if (!isVector && content.find("class       Field;") != std::string::npos)
+                        {
+                            // Look for "((" pattern which indicates vector data
+                            std::size_t dataStart = content.find('(', headerEnd);
+                            if (dataStart != std::string::npos)
+                            {
+                                // Skip whitespace after first '('
+                                std::size_t pos = dataStart + 1;
+                                while (pos < content.size() && std::isspace(content[pos]))
+                                {
+                                    ++pos;
+                                }
+                                // If next char is '(' then it's a vector
+                                if (pos < content.size() && content[pos] == '(')
+                                {
+                                    isVector = true;
+                                }
+                            }
+                        }
+
+                        // Create a string stream from the data portion
+                        std::string dataSection = content.substr(headerEnd + 1);
+                        IStringStream fieldIs(dataSection);
+
+                        // Read the field data
+                        if (isVector)
+                        {
+                            vectorField fullField(fieldIs);
+
+                            if (fullField.size() != nTotalBndFaces)
+                            {
+                                WarningInFunction
+                                    << "Field " << fieldFile << " has " << fullField.size()
+                                    << " values but expected " << nTotalBndFaces << nl
+                                    << "    Skipping..." << endl;
+                                continue;
+                            }
+
+                            vectorField reducedField(inletFaceIndices.size());
+
+                            // Extract only the faces that remain in oldInternalFaces
+                            forAll(inletFaceIndices, i)
+                            {
+                                reducedField[i] = fullField[inletFaceIndices[i]];
+                            }
+
+                            // Write the reduced field
+                            OFstream os(fieldPath);
+                            os  << "FoamFile" << nl
+                                << "{" << nl
+                                << "    version     2.0;" << nl
+                                << "    format      ascii;" << nl
+                                << "    class       vectorField;" << nl
+                                << "    object      " << fieldFile << ";" << nl
+                                << "}" << nl << nl;
+                            os << reducedField;
+                        }
+                        else
+                        {
+                            scalarField fullField(fieldIs);
+
+                            if (fullField.size() != nTotalBndFaces)
+                            {
+                                WarningInFunction
+                                    << "Field " << fieldFile << " has " << fullField.size()
+                                    << " values but expected " << nTotalBndFaces << nl
+                                    << "    Skipping..." << endl;
+                                continue;
+                            }
+
+                            scalarField reducedField(inletFaceIndices.size());
+
+                            // Extract only the faces that remain in oldInternalFaces
+                            forAll(inletFaceIndices, i)
+                            {
+                                reducedField[i] = fullField[inletFaceIndices[i]];
+                            }
+
+                            // Write the reduced field
+                            OFstream os(fieldPath);
+                            os  << "FoamFile" << nl
+                                << "{" << nl
+                                << "    version     2.0;" << nl
+                                << "    format      ascii;" << nl
+                                << "    class       scalarField;" << nl
+                                << "    object      " << fieldFile << ";" << nl
+                                << "}" << nl << nl;
+                            os << reducedField;
+                        }
+                    }
+                }
+
+                // Update the extractionMetadata to reflect new face count
+                {
+                    fileName metaPath = patchBoundaryDir / "extractionMetadata";
+                    IFstream metaIs(metaPath);
+                    dictionary metaDict(metaIs);
+                    metaDict.set("nGlobalFaces", inletFaceIndices.size());
+                    metaDict.set("originalNGlobalFaces", nTotalBndFaces);
+                    metaDict.set("outletFacesRemoved", outletFaceIndices.size());
+
+                    OFstream os(metaPath);
+                    os  << "FoamFile" << nl
+                        << "{" << nl
+                        << "    version     2.0;" << nl
+                        << "    format      ascii;" << nl
+                        << "    class       dictionary;" << nl
+                        << "    object      extractionMetadata;" << nl
+                        << "}" << nl << nl;
+                    metaDict.write(os, false);
+                }
+
+                Info<< "        Updated " << timeList.size() << " timesteps" << nl
+                    << "        New oldInternalFaces size: " << inletFaceIndices.size() << endl;
+            }
+            else
+            {
+                // No reordering needed - write single patch boundary
+                OFstream os(meshDir / "boundary");
+                writeHeader(os, "polyBoundaryMesh", "boundary");
+
+                os << "1" << nl << "(" << nl;
+                os << "    oldInternalFaces" << nl
+                   << "    {" << nl
+                   << "        type            patch;" << nl
+                   << "        nFaces          " << nTotalBndFaces << ";" << nl
+                   << "        startFace       " << startFace << ";" << nl
+                   << "    }" << nl;
+                os << ")" << nl;
+            }
         }
 
         Info<< "    Written subset mesh to " << meshDir << endl;
@@ -1064,116 +1665,297 @@ int main(int argc, char *argv[])
             }
         }
 
-        // Extract each field that appears in boundaryData
-        for (const word& fieldName : fieldsToExtract)
+        // Read face reordering info if it exists (created when outlet patch is made)
+        // Use the face order list we already have (still in scope)
+        labelList faceReorder;
+        label nOldInternalFaces = 0;
+        label nOutletFaces = 0;
+        bool hasOutlet = createOutlet && (outletFaceIndices.size() > 0);
+
+        if (hasOutlet)
         {
-            // Try to read scalar field from source
-            IOobject sfHeader
-            (
-                fieldName,
-                sourceTime.timeName(),
-                sourceMesh,
-                IOobject::READ_IF_PRESENT,
-                IOobject::NO_WRITE
-            );
-
-            if (sfHeader.typeHeaderOk<volScalarField>(true))
+            // Build faceReorder from inletFaceIndices and outletFaceIndices
+            // (still in scope from boundary creation above)
+            faceReorder.setSize(inletFaceIndices.size() + outletFaceIndices.size());
+            label idx = 0;
+            for (label oldIdx : inletFaceIndices)
             {
-                volScalarField sf(sfHeader, sourceMesh);
-
-                // Interpolate to subset
-                tmp<volScalarField> tsubField = meshSubset.interpolate(sf);
-                const volScalarField& subField = tsubField();
-
-                // Write to extract directory
-                OFstream os(initFieldDir / fieldName);
-                writeFieldHeader(os, "volScalarField", fieldName);
-
-                os << "dimensions      " << sf.dimensions() << ";" << nl << nl;
-                os << "internalField   nonuniform List<scalar>" << nl
-                   << subField.primitiveField().size() << nl << '(' << nl;
-                forAll(subField.primitiveField(), i)
-                {
-                    os << subField.primitiveField()[i] << nl;
-                }
-                os << ')' << ';' << nl << nl;
-
-                // Write boundary field
-                os << "boundaryField" << nl << '{' << nl;
-                forAll(subMesh.boundary(), patchi)
-                {
-                    const fvPatch& patch = subMesh.boundary()[patchi];
-                    os << "    " << patch.name() << nl
-                       << "    {" << nl
-                       << "        type            calculated;" << nl
-                       << "        value           nonuniform List<scalar>" << nl
-                       << "        " << subField.boundaryField()[patchi].size() << nl
-                       << "        (" << nl;
-                    forAll(subField.boundaryField()[patchi], i)
-                    {
-                        os << "        " << subField.boundaryField()[patchi][i] << nl;
-                    }
-                    os << "        );" << nl
-                       << "    }" << nl;
-                }
-                os << '}' << nl;
-
-                Info<< "    Extracted: " << fieldName << " (scalar)" << endl;
-                continue;
+                faceReorder[idx++] = oldIdx;
+            }
+            for (label oldIdx : outletFaceIndices)
+            {
+                faceReorder[idx++] = oldIdx;
             }
 
-            // Try to read vector field from source
-            IOobject vfHeader
-            (
-                fieldName,
-                sourceTime.timeName(),
-                sourceMesh,
-                IOobject::READ_IF_PRESENT,
-                IOobject::NO_WRITE
-            );
+            nOldInternalFaces = inletFaceIndices.size();
+            nOutletFaces = outletFaceIndices.size();
 
-            if (vfHeader.typeHeaderOk<volVectorField>(true))
+            Info<< "    Using face reordering for outlet patch" << nl
+                << "        oldInternalFaces: " << nOldInternalFaces << nl
+                << "        outlet: " << nOutletFaces << endl;
+        }
+
+        Info<< "    Fields to extract: " << fieldsToExtract << endl;
+
+        if (hasOutlet)
+        {
+            // With outlet patch, use cellMap() to extract real cell values
+            // This avoids any interpolation while still providing accurate initial values
+            Info<< "    Extracting fields with cellMap (outlet patch mode)..." << endl;
+
+            const labelList& cellMap = meshSubset.cellMap();
+
+            for (const word& fieldName : fieldsToExtract)
             {
-                volVectorField vf(vfHeader, sourceMesh);
+                Info<< "    Processing field: " << fieldName << endl;
 
-                // Interpolate to subset
-                tmp<volVectorField> tsubField = meshSubset.interpolate(vf);
-                const volVectorField& subField = tsubField();
+                bool isVector = (fieldName == "U" || fieldName == "U_0");
 
-                // Write to extract directory
-                OFstream os(initFieldDir / fieldName);
-                writeFieldHeader(os, "volVectorField", fieldName);
-
-                os << "dimensions      " << vf.dimensions() << ";" << nl << nl;
-                os << "internalField   nonuniform List<vector>" << nl
-                   << subField.primitiveField().size() << nl << '(' << nl;
-                forAll(subField.primitiveField(), i)
+                if (isVector)
                 {
-                    os << subField.primitiveField()[i] << nl;
-                }
-                os << ')' << ';' << nl << nl;
+                    IOobject vfIO
+                    (
+                        fieldName,
+                        sourceTime.timeName(),
+                        sourceMesh,
+                        IOobject::MUST_READ,
+                        IOobject::NO_WRITE
+                    );
 
-                // Write boundary field
-                os << "boundaryField" << nl << '{' << nl;
-                forAll(subMesh.boundary(), patchi)
-                {
-                    const fvPatch& patch = subMesh.boundary()[patchi];
-                    os << "    " << patch.name() << nl
-                       << "    {" << nl
-                       << "        type            calculated;" << nl
-                       << "        value           nonuniform List<vector>" << nl
-                       << "        " << subField.boundaryField()[patchi].size() << nl
-                       << "        (" << nl;
-                    forAll(subField.boundaryField()[patchi], i)
+                    if (!vfIO.typeHeaderOk<volVectorField>(false))
                     {
-                        os << "        " << subField.boundaryField()[patchi][i] << nl;
+                        WarningInFunction
+                            << "Cannot find vector field: " << fieldName << nl
+                            << "    Skipping..." << endl;
+                        continue;
                     }
-                    os << "        );" << nl
-                       << "    }" << nl;
-                }
-                os << '}' << nl;
 
-                Info<< "    Extracted: " << fieldName << " (vector)" << endl;
+                    volVectorField vf(vfIO, sourceMesh);
+
+                    // Extract internal field using cellMap (direct mapping, no interpolation)
+                    vectorField subInternal(cellMap.size());
+                    forAll(cellMap, subCelli)
+                    {
+                        subInternal[subCelli] = vf[cellMap[subCelli]];
+                    }
+
+                    OFstream os(initFieldDir / fieldName);
+                    writeFieldHeader(os, "volVectorField", fieldName);
+
+                    os << "dimensions      " << vf.dimensions() << ";" << nl << nl;
+                    os << "internalField   nonuniform List<vector>" << nl
+                       << subInternal.size() << nl << '(' << nl;
+                    forAll(subInternal, i)
+                    {
+                        os << subInternal[i] << nl;
+                    }
+                    os << ')' << ';' << nl << nl;
+
+                    os << "boundaryField" << nl << '{' << nl;
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl
+                       << "        type            spaceTimeWindow;" << nl
+                       << "        dataDir         \"constant/boundaryData\";" << nl
+                       << "        fixesValue      true;" << nl
+                       << "        value           uniform (0 0 0);" << nl
+                       << "    }" << nl;
+                    os << "    outlet" << nl
+                       << "    {" << nl
+                       << "        type            inletOutlet;" << nl
+                       << "        inletValue      uniform (0 0 0);" << nl
+                       << "        value           uniform (0 0 0);" << nl
+                       << "    }" << nl;
+                    os << '}' << nl;
+
+                    Info<< "    Extracted: " << fieldName << " (vector, "
+                        << subInternal.size() << " cells)" << endl;
+                }
+                else
+                {
+                    IOobject sfIO
+                    (
+                        fieldName,
+                        sourceTime.timeName(),
+                        sourceMesh,
+                        IOobject::MUST_READ,
+                        IOobject::NO_WRITE
+                    );
+
+                    if (!sfIO.typeHeaderOk<volScalarField>(false))
+                    {
+                        WarningInFunction
+                            << "Cannot find scalar field: " << fieldName << nl
+                            << "    Skipping..." << endl;
+                        continue;
+                    }
+
+                    volScalarField sf(sfIO, sourceMesh);
+
+                    // Extract internal field using cellMap (direct mapping, no interpolation)
+                    scalarField subInternal(cellMap.size());
+                    forAll(cellMap, subCelli)
+                    {
+                        subInternal[subCelli] = sf[cellMap[subCelli]];
+                    }
+
+                    OFstream os(initFieldDir / fieldName);
+                    writeFieldHeader(os, "volScalarField", fieldName);
+
+                    os << "dimensions      " << sf.dimensions() << ";" << nl << nl;
+                    os << "internalField   nonuniform List<scalar>" << nl
+                       << subInternal.size() << nl << '(' << nl;
+                    forAll(subInternal, i)
+                    {
+                        os << subInternal[i] << nl;
+                    }
+                    os << ')' << ';' << nl << nl;
+
+                    os << "boundaryField" << nl << '{' << nl;
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl
+                       << "        type            spaceTimeWindow;" << nl
+                       << "        dataDir         \"constant/boundaryData\";" << nl
+                       << "        fixesValue      true;" << nl
+                       << "        value           uniform 0;" << nl
+                       << "    }" << nl;
+                    os << "    outlet" << nl
+                       << "    {" << nl
+                       << "        type            zeroGradient;" << nl
+                       << "    }" << nl;
+                    os << '}' << nl;
+
+                    Info<< "    Extracted: " << fieldName << " (scalar, "
+                        << subInternal.size() << " cells)" << endl;
+                }
+            }
+        }
+        else
+        {
+            // No outlet - use cellMap() for direct cell value extraction (no interpolation)
+            Info<< "    Extracting fields with cellMap (no outlet)..." << endl;
+
+            const labelList& cellMap = meshSubset.cellMap();
+
+            for (const word& fieldName : fieldsToExtract)
+            {
+                Info<< "    Processing field: " << fieldName << endl;
+
+                bool isVector = (fieldName == "U" || fieldName == "U_0");
+
+                if (!isVector)
+                {
+                    IOobject sfIO
+                    (
+                        fieldName,
+                        sourceTime.timeName(),
+                        sourceMesh,
+                        IOobject::MUST_READ,
+                        IOobject::NO_WRITE
+                    );
+
+                    if (!sfIO.typeHeaderOk<volScalarField>(false))
+                    {
+                        WarningInFunction
+                            << "Cannot find scalar field: " << fieldName << nl
+                            << "    Skipping..." << endl;
+                        continue;
+                    }
+
+                    volScalarField sf(sfIO, sourceMesh);
+
+                    // Extract internal field using cellMap (direct mapping, no interpolation)
+                    scalarField subInternal(cellMap.size());
+                    forAll(cellMap, subCelli)
+                    {
+                        subInternal[subCelli] = sf[cellMap[subCelli]];
+                    }
+
+                    OFstream os(initFieldDir / fieldName);
+                    writeFieldHeader(os, "volScalarField", fieldName);
+
+                    os << "dimensions      " << sf.dimensions() << ";" << nl << nl;
+                    os << "internalField   nonuniform List<scalar>" << nl
+                       << subInternal.size() << nl << '(' << nl;
+                    forAll(subInternal, i)
+                    {
+                        os << subInternal[i] << nl;
+                    }
+                    os << ')' << ';' << nl << nl;
+
+                    os << "boundaryField" << nl << '{' << nl;
+                    forAll(subMesh.boundary(), patchi)
+                    {
+                        const fvPatch& patch = subMesh.boundary()[patchi];
+                        os << "    " << patch.name() << nl
+                           << "    {" << nl
+                           << "        type            spaceTimeWindow;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        fixesValue      true;" << nl
+                           << "        value           uniform 0;" << nl
+                           << "    }" << nl;
+                    }
+                    os << '}' << nl;
+
+                    Info<< "    Extracted: " << fieldName << " (scalar, "
+                        << subInternal.size() << " cells)" << endl;
+                }
+                else
+                {
+                    IOobject vfIO
+                    (
+                        fieldName,
+                        sourceTime.timeName(),
+                        sourceMesh,
+                        IOobject::MUST_READ,
+                        IOobject::NO_WRITE
+                    );
+
+                    if (!vfIO.typeHeaderOk<volVectorField>(false))
+                    {
+                        WarningInFunction
+                            << "Cannot find vector field: " << fieldName << nl
+                            << "    Skipping..." << endl;
+                        continue;
+                    }
+
+                    volVectorField vf(vfIO, sourceMesh);
+
+                    // Extract internal field using cellMap (direct mapping, no interpolation)
+                    vectorField subInternal(cellMap.size());
+                    forAll(cellMap, subCelli)
+                    {
+                        subInternal[subCelli] = vf[cellMap[subCelli]];
+                    }
+
+                    OFstream os(initFieldDir / fieldName);
+                    writeFieldHeader(os, "volVectorField", fieldName);
+
+                    os << "dimensions      " << vf.dimensions() << ";" << nl << nl;
+                    os << "internalField   nonuniform List<vector>" << nl
+                       << subInternal.size() << nl << '(' << nl;
+                    forAll(subInternal, i)
+                    {
+                        os << subInternal[i] << nl;
+                    }
+                    os << ')' << ';' << nl << nl;
+
+                    os << "boundaryField" << nl << '{' << nl;
+                    forAll(subMesh.boundary(), patchi)
+                    {
+                        const fvPatch& patch = subMesh.boundary()[patchi];
+                        os << "    " << patch.name() << nl
+                           << "    {" << nl
+                           << "        type            spaceTimeWindow;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        fixesValue      true;" << nl
+                           << "        value           uniform (0 0 0);" << nl
+                           << "    }" << nl;
+                    }
+                    os << '}' << nl;
+
+                    Info<< "    Extracted: " << fieldName << " (vector, "
+                        << subInternal.size() << " cells)" << endl;
+                }
             }
         }
 
@@ -1212,6 +1994,38 @@ int main(int argc, char *argv[])
         Info<< "    " << bMesh[patchi].name()
             << " (" << bMesh[patchi].type() << "): "
             << bMesh[patchi].size() << " faces" << endl;
+    }
+
+    // Apply mass flux correction if requested
+    // Must be done BEFORE outlet faces are removed from boundaryData
+    // so that the correction is computed over all original boundary faces
+    if (correctMassFlux)
+    {
+        // Find the oldInternalFaces patch to get face area vectors
+        label oifPatchI = bMesh.findPatchID("oldInternalFaces");
+        if (oifPatchI >= 0)
+        {
+            // Get face area vectors for oldInternalFaces patch
+            const polyPatch& oifPatch = bMesh[oifPatchI];
+            vectorField faceSf(oifPatch.size());
+
+            // Compute Sf from face areas and normals
+            const vectorField& faceAreas = mesh.faceAreas();
+            label startFace = oifPatch.start();
+
+            forAll(oifPatch, i)
+            {
+                faceSf[i] = faceAreas[startFace + i];
+            }
+
+            // Apply mass flux correction to all timesteps in boundaryData
+            correctMassFluxInBoundaryData(patchBoundaryDir, timeList, faceSf);
+        }
+        else
+        {
+            WarningInFunction
+                << "oldInternalFaces patch not found, skipping mass flux correction" << endl;
+        }
     }
 
     // 5. Find extracted fields from boundaryData

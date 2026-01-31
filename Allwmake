@@ -6,14 +6,20 @@ cd "${0%/*}" || exit                                # Run from this directory
 # Check for 'doc' argument to build documentation only
 if [ "$1" = "doc" ]; then
     echo "Building documentation..."
-    if command -v doxygen >/dev/null 2>&1; then
-        doxygen doc/Doxyfile
-        echo ""
-        echo "Documentation built: doc/html/index.html"
-    else
+    if ! command -v doxygen >/dev/null 2>&1; then
         echo "Error: doxygen not found. Install doxygen to build documentation."
         exit 1
     fi
+
+    # Generate HTML documentation
+    doxygen doc/Doxyfile
+
+    echo ""
+    echo "Documentation built: doc/html/index.html"
+    echo ""
+    echo "Note: PDF generation is disabled due to tabu package compatibility issues"
+    echo "      with modern LaTeX distributions. The existing refman.pdf in the repo"
+    echo "      can be used, or regenerate manually with a compatible LaTeX setup."
     exit 0
 fi
 

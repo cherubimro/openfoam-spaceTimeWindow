@@ -748,12 +748,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (timeList.size() < 2)
+    if (timeList.size() < 5)
     {
         FatalErrorInFunction
-            << "Need at least 2 time directories in boundaryData, found "
+            << "Need at least 5 time directories in boundaryData, found "
             << timeList.size() << nl
-            << "    The spaceTimeWindow BC requires data beyond the current time" << nl
+            << "    The spaceTimeWindow BC with cubic interpolation requires" << nl
+            << "    4 timesteps for interpolation: t_{i-1}, t_i, t_{i+1}, t_{i+2}" << nl
+            << "    Plus buffer at start (t_0, t_1) and end (t_{n-1}, t_n)" << nl
             << exit(FatalError);
     }
 
@@ -763,19 +765,27 @@ int main(int argc, char *argv[])
         return a.first() < b.first();
     });
 
-    // First timestep (minimum)
+    // First timestep (minimum) - t_0, used only for cubic interpolation lookback
     word minTimeName = timeList.first().second();
     scalar minTime = timeList.first().first();
 
     // Last timestep (maximum) - for information only
     word maxTimeName = timeList.last().second();
 
-    // Second-to-last timestep - this is the usable endTime
-    // because the BC reads ahead to the next timestep
-    word endTimeName = timeList[timeList.size() - 2].second();
+    // Third timestep (t_2) - this is the usable startTime
+    // Cubic interpolation in interval [t_2, t_3] needs t_1, t_2, t_3, t_4
+    // so t_0 and t_1 are buffer for lookback
+    word startTimeName = timeList[2].second();
+    scalar startTime = timeList[2].first();
+
+    // Third-to-last timestep (t_{n-2}) - this is the usable endTime
+    // Cubic interpolation in interval [t_{n-3}, t_{n-2}] needs t_{n-4}, t_{n-3}, t_{n-2}, t_{n-1}
+    // so t_{n-1} and t_n are buffer for lookahead
+    word endTimeName = timeList[timeList.size() - 3].second();
 
     Info<< "Boundary data time range: " << minTimeName << " to " << maxTimeName << nl
-        << "    Usable endTime: " << endTimeName << " (BC requires next timestep data)" << nl
+        << "    Usable startTime: " << startTimeName << " (cubic needs t_0, t_1 for lookback)" << nl
+        << "    Usable endTime: " << endTimeName << " (cubic needs t_{n-1}, t_n for lookahead)" << nl
         << endl;
 
     // If encrypted, decrypt all boundary data files now
@@ -824,7 +834,7 @@ int main(int argc, char *argv[])
 
     // 1. Create controlDict
     Info<< "Creating system files..." << endl;
-    writeControlDict(extractDir, metadata, sourceControlDict, minTimeName, endTimeName);
+    writeControlDict(extractDir, metadata, sourceControlDict, startTimeName, endTimeName);
 
     // 2. Copy system files
     copyFile(sourceCase / "system" / "fvSchemes", extractDir / "system" / "fvSchemes");
@@ -999,16 +1009,16 @@ int main(int argc, char *argv[])
 
         Info<< "    Written subset mesh to " << meshDir << endl;
 
-        // Also extract initial fields from source case at extraction start time
+        // Also extract initial fields from source case at the reconstruction start time (t_1)
         // This is needed because parallel extraction doesn't write initial fields
         // (cell ordering would not match the mesh created here)
-        scalar extractionStartTime = metadata.get<scalar>("extractionStartTime");
-        word startTimeName = minTimeName;
+        // Note: We use startTime (t_1), not minTime (t_0), because reconstruction
+        // starts at t_1 to ensure cubic interpolation has lookback data at t_0
 
         Info<< nl << "Extracting initial fields from source case at t=" << startTimeName << "..." << endl;
 
-        // Set source time to extraction start time
-        sourceTime.setTime(extractionStartTime, 0);
+        // Set source time to reconstruction start time (t_1)
+        sourceTime.setTime(startTime, 0);
 
         // Create initial field time directory
         fileName initFieldDir = extractDir / startTimeName;

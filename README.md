@@ -190,7 +190,8 @@ spaceTimeWindowInitCase -sourceCase ../ufr2-02 -extractDir ./subset-case
 **What it creates:**
 
 1. `system/controlDict` - With matching solver, deltaT, adjustTimeStep from extraction
-   - **Note:** `endTime` is set to the **second-to-last** available timestep, because the `spaceTimeWindow` BC reads ahead to the next timestep
+   - **Note:** `startTime` is set to the **third** available timestep (t_2), because cubic interpolation needs t_0 and t_1 as lookback data
+   - **Note:** `endTime` is set to the **third-to-last** available timestep (t_{n-2}), because cubic interpolation needs t_{n-1} and t_n as lookahead data
 2. `system/fvSchemes`, `system/fvSolution` - Copied from source case
 3. `constant/` files - All physics properties copied (mandatory for fidelity):
    - `turbulenceProperties`, `transportProperties`
@@ -235,12 +236,102 @@ oldInternalFaces
 | setAverage     | Adjust mapped field to match average           | no       | false                |
 | offset         | Offset value added to field                    | no       | Zero                 |
 | fixesValue     | Report to adjustPhi that values are fixed      | no       | true                 |
+| allowTimeInterpolation | Permit interpolation for missing timesteps | no | false |
+| timeInterpolationScheme | Interpolation method: `linear` or `cubic` | no | linear |
+| reportFlux     | Print net flux through patch (velocity only)   | no       | false                |
 
 **Notes:**
 - Does NO spatial interpolation (values are pre-computed for exact face positions)
-- Does NO temporal interpolation - requires exact timestep matching with source simulation
-- Will error if simulation time doesn't match an available timestep
+- By default (`allowTimeInterpolation = false`), requires exact timestep matching with source simulation
+- Will error if simulation time doesn't match an available timestep (unless `allowTimeInterpolation = true`)
 - Metadata validation enforces identical `deltaT` to ensure timestep alignment
+- **Extrapolation outside the extraction window is NEVER allowed**, regardless of `allowTimeInterpolation` setting
+
+### Time Interpolation
+
+By default, the BC requires exact timestep matching between extraction and reconstruction. This is the safest option ensuring reproducibility.
+
+If your reconstruction case cannot match the extraction timesteps exactly (e.g., different solver constraints, restarts), you can enable time interpolation:
+
+```cpp
+oldInternalFaces
+{
+    type                    spaceTimeWindow;
+    dataDir                 "constant/boundaryData";
+    allowTimeInterpolation  true;   // Permit interpolation between timesteps
+    timeInterpolationScheme cubic;  // Use cubic spline (or "linear")
+    value                   uniform (0 0 0);
+}
+```
+
+**When `allowTimeInterpolation = false` (default):**
+- Simulation time must exactly match an available sample time (within 1% of deltaT tolerance)
+- Fatal error if no matching timestep is found
+- Ensures bit-reproducible results
+
+**When `allowTimeInterpolation = true`:**
+- Interpolation between bracketing timesteps is permitted
+- Useful when extraction and reconstruction have slightly different time stepping
+- Extrapolation outside `[extractionStartTime, extractionStopTime]` still causes a fatal error
+
+**Time Interpolation Schemes:**
+
+| Scheme | Description | Points Used |
+|--------|-------------|-------------|
+| `linear` | Simple linear interpolation (default) | 2 (bracketing timesteps) |
+| `cubic` | Catmull-Rom cubic spline | 4 (2 before, 2 after) |
+
+**Linear interpolation** (`timeInterpolationScheme linear`):
+- Uses two bracketing timesteps: t_i and t_{i+1}
+- Simple weighted average: `value = (1-alpha) * v_i + alpha * v_{i+1}`
+- Sufficient for smoothly varying flows
+
+**Cubic spline interpolation** (`timeInterpolationScheme cubic`):
+- Uses four timesteps: t_{i-1}, t_i, t_{i+1}, t_{i+2}
+- **Centripetal Catmull-Rom spline** - handles non-uniform time spacing correctly
+- Essential for adaptive timestepping (`adjustTimeStep = yes`) where dt varies with CFL
+- Provides C1 continuity (smooth first derivatives) without overshoots or cusps
+- Better captures temporal variations in turbulent flows
+- Requires at least 5 timesteps in boundaryData (2 buffer at start + 2 buffer at end + 1 usable)
+
+The centripetal parameterization (Barry & Goldman, 1988) prevents the numerical artifacts that standard Catmull-Rom produces with non-uniform data spacing, making it the correct choice for CFD simulations with variable timesteps.
+
+**Time range for cubic interpolation:** `spaceTimeWindowInitCase` automatically sets:
+- `startTime = t_2` (third timestep) - so t_0 and t_1 are available for lookback
+- `endTime = t_{n-2}` (third-to-last) - so t_{n-1} and t_n are available for lookahead
+
+This ensures cubic interpolation has all 4 required points throughout the entire reconstruction. When the solver is at time t in the interval [t_2, t_3], cubic interpolation uses t_1, t_2, t_3, t_4 - meaning t_0 and t_1 provide the necessary lookback buffer. Requires at least 5 timesteps in boundaryData.
+
+For turbulent LES simulations with significant temporal fluctuations, `cubic` interpolation produces smoother, more physically realistic boundary conditions when interpolation is needed
+
+### Flux Reporting
+
+The `reportFlux` option enables diagnostic output showing the net mass flux through the `oldInternalFaces` patch at each timestep. This is useful for verifying mass conservation.
+
+```cpp
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    fixesValue      true;
+    reportFlux      true;   // Enable flux diagnostics
+    value           uniform (0 0 0);
+}
+```
+
+**Output example:**
+```
+spaceTimeWindow flux report [oldInternalFaces] t=0.001 fixesValue=true netFlux=1.234e-06 (in=-0.0523 out=0.0523)
+```
+
+- **netFlux**: Total net flux through patch (should be ~0 for mass conservation)
+- **in**: Sum of inward fluxes (negative values, into domain)
+- **out**: Sum of outward fluxes (positive values, out of domain)
+- **fixesValue**: Shows whether `adjustPhi()` will modify this patch's flux
+
+When `fixesValue=true`, `adjustPhi()` treats the patch as fixed and won't correct its flux - any imbalance is absorbed by other patches (typically outlets). When `fixesValue=false`, `adjustPhi()` can adjust the flux on this patch to enforce global mass conservation.
+
+**Note:** `reportFlux` only produces output for vector fields (i.e., velocity U).
 
 ## Mass Conservation and `fixesValue`
 
@@ -457,6 +548,16 @@ Time step mismatch between extraction and reconstruction!
 ## Building
 
 ```bash
+# Build everything (library + utilities)
+./Allwmake
+
+# Or build with encryption support (requires libsodium)
+# ./Allwmake will auto-detect libsodium if installed
+```
+
+### Manual Build
+
+```bash
 # Build the library (BC and function object)
 cd src/spaceTimeWindow
 wmake
@@ -465,6 +566,18 @@ wmake
 cd applications/utilities/preProcessing/spaceTimeWindowInitCase
 wmake
 ```
+
+## Documentation
+
+API documentation can be generated with Doxygen:
+
+```bash
+./Allwmake doc
+```
+
+This generates HTML documentation in `doc/html/index.html`.
+
+**Requirements:** Doxygen and Graphviz (for class diagrams)
 
 ## Requirements
 
@@ -536,7 +649,7 @@ Anton, A.-A. (2011). *"Space-Time Window Reconstruction in Parallel High Perform
 ## Limitations
 
 - No spatial interpolation - mesh topology must match exactly
-- No temporal interpolation - all timesteps from source simulation required
-- Boundary data must cover full reconstruction time range
+- No temporal extrapolation - boundary data must cover full reconstruction time range
+- By default, no temporal interpolation (requires exact timestep matching); can be enabled via `allowTimeInterpolation` with `linear` or `cubic` scheme
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`

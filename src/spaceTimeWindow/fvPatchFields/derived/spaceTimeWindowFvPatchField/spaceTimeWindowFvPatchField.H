@@ -56,7 +56,23 @@ Usage
         setAverage   | adjust mapped field average      | no       | false
         offset       | offset value added to field      | no       | Zero
         fixesValue   | report to adjustPhi that values are fixed | no | true
+        allowTimeInterpolation | permit interpolation for missing timesteps | no | false
+        timeInterpolationScheme | interpolation method: linear or cubic | no | linear
+        reportFlux   | print net flux through patch (velocity field only) | no | false
     \endtable
+
+    Note: When allowTimeInterpolation is false (default), the BC requires exact
+    timestep matching and will error if the simulation time does not match an
+    available sample time. When true, interpolation between available timesteps
+    is permitted using the selected scheme. Extrapolation outside the extraction
+    window [startTime, stopTime] is NEVER allowed regardless of this setting.
+
+    Time interpolation schemes:
+    - linear: Simple linear interpolation between 2 bracketing timesteps
+    - cubic: Centripetal Catmull-Rom cubic spline using 4 timesteps. Handles
+      non-uniform time spacing correctly (important for adaptive timestepping).
+      Smoother than linear, better for turbulent flows. Falls back to linear
+      at start/end of time range where only 2 points are available.
 
     Example of the boundary condition specification:
     \verbatim
@@ -67,6 +83,8 @@ Usage
         setAverage      false;
         offset          (0 0 0);    // For vectors
         fixesValue      true;       // Tell adjustPhi to exclude this patch
+        allowTimeInterpolation  true;   // Allow interpolation for missing timesteps
+        timeInterpolationScheme cubic;  // Use cubic spline (or "linear")
         value           uniform (0 0 0);
     }
     \endverbatim
@@ -96,6 +114,17 @@ class spaceTimeWindowFvPatchField
 :
     public fixedValueFvPatchField<Type>
 {
+public:
+
+    //- Time interpolation scheme enumeration
+    enum class timeInterpScheme
+    {
+        LINEAR,     //!< Linear interpolation (2 points)
+        CUBIC       //!< Catmull-Rom cubic spline (4 points)
+    };
+
+private:
+
     // Private Data
 
         //- Path to boundaryData directory
@@ -113,20 +142,33 @@ class spaceTimeWindowFvPatchField
         //- If true, report to adjustPhi that this patch fixes values
         bool fixesValue_;
 
+        //- If true, allow temporal interpolation for missing timesteps
+        //  If false (default), require exact timestep matching
+        //  Note: extrapolation outside [startTime, stopTime] is NEVER allowed
+        bool allowTimeInterpolation_;
+
+        //- Time interpolation scheme (linear or cubic)
+        timeInterpScheme timeInterpolationScheme_;
+
+        //- If true, report net flux through patch at each timestep (velocity field only)
+        bool reportFlux_;
+
         //- List of available time directories
         mutable instantList sampleTimes_;
 
-        //- Current time index in sampleTimes_
-        mutable label startSampleTime_;
+        //- Time indices for interpolation [i0, i1, i2, i3] for cubic, [i1, i2] for linear
+        //  Current time falls between i1 and i2
+        mutable label sampleTimeIndex0_;  // t_{i-1} for cubic
+        mutable label sampleTimeIndex1_;  // t_i (lower bracket)
+        mutable label sampleTimeIndex2_;  // t_{i+1} (upper bracket)
+        mutable label sampleTimeIndex3_;  // t_{i+2} for cubic
 
-        //- End time index for interpolation
-        mutable label endSampleTime_;
-
-        //- Cached field data at start time
-        mutable Field<Type> startSampledValues_;
-
-        //- Cached field data at end time
-        mutable Field<Type> endSampledValues_;
+        //- Cached field data at the 4 time levels (for cubic)
+        //  For linear interpolation, only values1_ and values2_ are used
+        mutable Field<Type> sampledValues0_;  // t_{i-1}
+        mutable Field<Type> sampledValues1_;  // t_i
+        mutable Field<Type> sampledValues2_;  // t_{i+1}
+        mutable Field<Type> sampledValues3_;  // t_{i+2}
 
         //- Whether metadata has been validated
         mutable bool metadataValidated_;
@@ -145,6 +187,23 @@ class spaceTimeWindowFvPatchField
 
         //- Validate extraction metadata against current time settings
         void validateMetadata() const;
+
+        //- Centripetal Catmull-Rom cubic spline interpolation
+        //  Returns interpolated value at time t between t1 and t2
+        //  using control points at times t0, t1, t2, t3 with values p0, p1, p2, p3
+        //  Centripetal parameterization handles non-uniform time spacing correctly
+        Type catmullRomCentripetal
+        (
+            const Type& p0,
+            const Type& p1,
+            const Type& p2,
+            const Type& p3,
+            scalar t0,
+            scalar t1,
+            scalar t2,
+            scalar t3,
+            scalar t
+        ) const;
 
 
 public:

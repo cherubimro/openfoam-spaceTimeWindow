@@ -204,30 +204,32 @@ void Foam::spaceTimeWindowFvPatchField<Type>::checkTable()
     if (sampleTimes_.empty())
     {
         findSampleTimes();
-        startSampleTime_ = -1;
-        endSampleTime_ = -1;
+        sampleTimeIndex0_ = -1;
+        sampleTimeIndex1_ = -1;
+        sampleTimeIndex2_ = -1;
+        sampleTimeIndex3_ = -1;
     }
 
     const scalar currentTime = this->db().time().value();
 
-    // Find bracketing times
-    label lo = -1;
-    label hi = -1;
+    // Find bracketing times (i1 <= currentTime <= i2)
+    label i1 = -1;
+    label i2 = -1;
 
     for (label i = 0; i < sampleTimes_.size(); ++i)
     {
         if (sampleTimes_[i].value() <= currentTime)
         {
-            lo = i;
+            i1 = i;
         }
-        if (sampleTimes_[i].value() >= currentTime && hi < 0)
+        if (sampleTimes_[i].value() >= currentTime && i2 < 0)
         {
-            hi = i;
+            i2 = i;
         }
     }
 
     // Strict time bounds - NO extrapolation allowed
-    if (lo < 0)
+    if (i1 < 0)
     {
         FatalErrorInFunction
             << "Current time " << currentTime
@@ -238,7 +240,7 @@ void Foam::spaceTimeWindowFvPatchField<Type>::checkTable()
             << "    (run spaceTimeWindowExtract first)" << nl
             << exit(FatalError);
     }
-    if (hi < 0)
+    if (i2 < 0)
     {
         FatalErrorInFunction
             << "Current time " << currentTime
@@ -250,23 +252,39 @@ void Foam::spaceTimeWindowFvPatchField<Type>::checkTable()
             << exit(FatalError);
     }
 
-    // Check if we need to load new data
-    if (lo != startSampleTime_)
-    {
-        startSampleTime_ = lo;
-        startSampledValues_ = readFieldData(sampleTimes_[lo]);
+    // Determine indices for interpolation
+    // For linear: need i1, i2
+    // For cubic: need i0, i1, i2, i3 (clamp at boundaries)
+    label i0 = max(i1 - 1, label(0));
+    label i3 = min(i2 + 1, sampleTimes_.size() - 1);
 
-        DebugInfo
-            << "Loaded start time data: " << sampleTimes_[lo].name() << endl;
+    // Load data if indices changed
+    if (i0 != sampleTimeIndex0_)
+    {
+        sampleTimeIndex0_ = i0;
+        sampledValues0_ = readFieldData(sampleTimes_[i0]);
+        DebugInfo << "Loaded time[0] data: " << sampleTimes_[i0].name() << endl;
     }
 
-    if (hi != endSampleTime_)
+    if (i1 != sampleTimeIndex1_)
     {
-        endSampleTime_ = hi;
-        endSampledValues_ = readFieldData(sampleTimes_[hi]);
+        sampleTimeIndex1_ = i1;
+        sampledValues1_ = readFieldData(sampleTimes_[i1]);
+        DebugInfo << "Loaded time[1] data: " << sampleTimes_[i1].name() << endl;
+    }
 
-        DebugInfo
-            << "Loaded end time data: " << sampleTimes_[hi].name() << endl;
+    if (i2 != sampleTimeIndex2_)
+    {
+        sampleTimeIndex2_ = i2;
+        sampledValues2_ = readFieldData(sampleTimes_[i2]);
+        DebugInfo << "Loaded time[2] data: " << sampleTimes_[i2].name() << endl;
+    }
+
+    if (i3 != sampleTimeIndex3_)
+    {
+        sampleTimeIndex3_ = i3;
+        sampledValues3_ = readFieldData(sampleTimes_[i3]);
+        DebugInfo << "Loaded time[3] data: " << sampleTimes_[i3].name() << endl;
     }
 }
 
@@ -413,6 +431,69 @@ void Foam::spaceTimeWindowFvPatchField<Type>::validateMetadata() const
 }
 
 
+template<class Type>
+Type Foam::spaceTimeWindowFvPatchField<Type>::catmullRomCentripetal
+(
+    const Type& p0,
+    const Type& p1,
+    const Type& p2,
+    const Type& p3,
+    scalar t0,
+    scalar t1,
+    scalar t2,
+    scalar t3,
+    scalar t
+) const
+{
+    // Centripetal Catmull-Rom spline interpolation
+    // Handles non-uniform time spacing correctly (important for adaptive dt)
+    //
+    // Reference: Barry & Goldman (1988) "A recursive evaluation algorithm
+    //            for a class of Catmull-Rom splines"
+    //
+    // The centripetal parameterization uses alpha=0.5 for the knot sequence,
+    // which prevents cusps and self-intersections with non-uniform data.
+    //
+    // Knot parameterization with alpha=0.5 (centripetal):
+    //   For 1D time data, |t_{i+1} - t_i|^0.5 simplifies since time is monotonic
+
+    // Compute knot intervals using centripetal parameterization
+    // For time values (1D), the "distance" is just the time difference
+    const scalar dt01 = Foam::sqrt(Foam::mag(t1 - t0));
+    const scalar dt12 = Foam::sqrt(Foam::mag(t2 - t1));
+    const scalar dt23 = Foam::sqrt(Foam::mag(t3 - t2));
+
+    // Avoid division by zero for duplicate times
+    const scalar eps = SMALL;
+
+    // Knot values (cumulative)
+    const scalar k0 = 0.0;
+    const scalar k1 = k0 + max(dt01, eps);
+    const scalar k2 = k1 + max(dt12, eps);
+    const scalar k3 = k2 + max(dt23, eps);
+
+    // Map input time t to knot parameter u
+    // t is in [t1, t2], map to u in [k1, k2]
+    const scalar alpha = (t - t1) / (t2 - t1 + eps);
+    const scalar u = k1 + alpha * (k2 - k1);
+
+    // Barry-Goldman pyramid algorithm for Catmull-Rom evaluation
+    // First level interpolations
+    const Type A1 = (k1 - u)/(k1 - k0 + eps) * p0 + (u - k0)/(k1 - k0 + eps) * p1;
+    const Type A2 = (k2 - u)/(k2 - k1 + eps) * p1 + (u - k1)/(k2 - k1 + eps) * p2;
+    const Type A3 = (k3 - u)/(k3 - k2 + eps) * p2 + (u - k2)/(k3 - k2 + eps) * p3;
+
+    // Second level interpolations
+    const Type B1 = (k2 - u)/(k2 - k0 + eps) * A1 + (u - k0)/(k2 - k0 + eps) * A2;
+    const Type B2 = (k3 - u)/(k3 - k1 + eps) * A2 + (u - k1)/(k3 - k1 + eps) * A3;
+
+    // Final interpolation
+    const Type C = (k2 - u)/(k2 - k1 + eps) * B1 + (u - k1)/(k2 - k1 + eps) * B2;
+
+    return C;
+}
+
+
 // * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
 
 template<class Type>
@@ -428,11 +509,18 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     setAverage_(false),
     offset_(Zero),
     fixesValue_(true),
+    allowTimeInterpolation_(false),
+    timeInterpolationScheme_(timeInterpScheme::LINEAR),
+    reportFlux_(false),
     sampleTimes_(),
-    startSampleTime_(-1),
-    endSampleTime_(-1),
-    startSampledValues_(),
-    endSampledValues_(),
+    sampleTimeIndex0_(-1),
+    sampleTimeIndex1_(-1),
+    sampleTimeIndex2_(-1),
+    sampleTimeIndex3_(-1),
+    sampledValues0_(),
+    sampledValues1_(),
+    sampledValues2_(),
+    sampledValues3_(),
     metadataValidated_(false)
 {}
 
@@ -451,13 +539,34 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     setAverage_(dict.getOrDefault("setAverage", false)),
     offset_(dict.getOrDefault<Type>("offset", Zero)),
     fixesValue_(dict.getOrDefault("fixesValue", true)),
+    allowTimeInterpolation_(dict.getOrDefault("allowTimeInterpolation", false)),
+    timeInterpolationScheme_(timeInterpScheme::LINEAR),
+    reportFlux_(dict.getOrDefault("reportFlux", false)),
     sampleTimes_(),
-    startSampleTime_(-1),
-    endSampleTime_(-1),
-    startSampledValues_(),
-    endSampledValues_(),
+    sampleTimeIndex0_(-1),
+    sampleTimeIndex1_(-1),
+    sampleTimeIndex2_(-1),
+    sampleTimeIndex3_(-1),
+    sampledValues0_(),
+    sampledValues1_(),
+    sampledValues2_(),
+    sampledValues3_(),
     metadataValidated_(false)
 {
+    // Parse time interpolation scheme
+    const word schemeStr = dict.getOrDefault<word>("timeInterpolationScheme", "linear");
+    if (schemeStr == "cubic")
+    {
+        timeInterpolationScheme_ = timeInterpScheme::CUBIC;
+    }
+    else if (schemeStr != "linear")
+    {
+        FatalIOErrorInFunction(dict)
+            << "Unknown timeInterpolationScheme: " << schemeStr << nl
+            << "    Valid options: linear, cubic" << nl
+            << exit(FatalIOError);
+    }
+
     if (dict.found("value"))
     {
         fvPatchField<Type>::operator=
@@ -483,11 +592,18 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     setAverage_(ptf.setAverage_),
     offset_(ptf.offset_),
     fixesValue_(ptf.fixesValue_),
+    allowTimeInterpolation_(ptf.allowTimeInterpolation_),
+    timeInterpolationScheme_(ptf.timeInterpolationScheme_),
+    reportFlux_(ptf.reportFlux_),
     sampleTimes_(ptf.sampleTimes_),
-    startSampleTime_(-1),
-    endSampleTime_(-1),
-    startSampledValues_(),
-    endSampledValues_(),
+    sampleTimeIndex0_(-1),
+    sampleTimeIndex1_(-1),
+    sampleTimeIndex2_(-1),
+    sampleTimeIndex3_(-1),
+    sampledValues0_(),
+    sampledValues1_(),
+    sampledValues2_(),
+    sampledValues3_(),
     metadataValidated_(ptf.metadataValidated_)
 {}
 
@@ -504,11 +620,18 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     setAverage_(ptf.setAverage_),
     offset_(ptf.offset_),
     fixesValue_(ptf.fixesValue_),
+    allowTimeInterpolation_(ptf.allowTimeInterpolation_),
+    timeInterpolationScheme_(ptf.timeInterpolationScheme_),
+    reportFlux_(ptf.reportFlux_),
     sampleTimes_(ptf.sampleTimes_),
-    startSampleTime_(ptf.startSampleTime_),
-    endSampleTime_(ptf.endSampleTime_),
-    startSampledValues_(ptf.startSampledValues_),
-    endSampledValues_(ptf.endSampledValues_),
+    sampleTimeIndex0_(ptf.sampleTimeIndex0_),
+    sampleTimeIndex1_(ptf.sampleTimeIndex1_),
+    sampleTimeIndex2_(ptf.sampleTimeIndex2_),
+    sampleTimeIndex3_(ptf.sampleTimeIndex3_),
+    sampledValues0_(ptf.sampledValues0_),
+    sampledValues1_(ptf.sampledValues1_),
+    sampledValues2_(ptf.sampledValues2_),
+    sampledValues3_(ptf.sampledValues3_),
     metadataValidated_(ptf.metadataValidated_)
 {}
 
@@ -526,11 +649,18 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     setAverage_(ptf.setAverage_),
     offset_(ptf.offset_),
     fixesValue_(ptf.fixesValue_),
+    allowTimeInterpolation_(ptf.allowTimeInterpolation_),
+    timeInterpolationScheme_(ptf.timeInterpolationScheme_),
+    reportFlux_(ptf.reportFlux_),
     sampleTimes_(ptf.sampleTimes_),
-    startSampleTime_(ptf.startSampleTime_),
-    endSampleTime_(ptf.endSampleTime_),
-    startSampledValues_(ptf.startSampledValues_),
-    endSampledValues_(ptf.endSampledValues_),
+    sampleTimeIndex0_(ptf.sampleTimeIndex0_),
+    sampleTimeIndex1_(ptf.sampleTimeIndex1_),
+    sampleTimeIndex2_(ptf.sampleTimeIndex2_),
+    sampleTimeIndex3_(ptf.sampleTimeIndex3_),
+    sampledValues0_(ptf.sampledValues0_),
+    sampledValues1_(ptf.sampledValues1_),
+    sampledValues2_(ptf.sampledValues2_),
+    sampledValues3_(ptf.sampledValues3_),
     metadataValidated_(ptf.metadataValidated_)
 {}
 
@@ -546,10 +676,14 @@ void Foam::spaceTimeWindowFvPatchField<Type>::autoMap
     fixedValueFvPatchField<Type>::autoMap(m);
 
     // Clear cached data - will reload on next updateCoeffs
-    startSampledValues_.clear();
-    endSampledValues_.clear();
-    startSampleTime_ = -1;
-    endSampleTime_ = -1;
+    sampledValues0_.clear();
+    sampledValues1_.clear();
+    sampledValues2_.clear();
+    sampledValues3_.clear();
+    sampleTimeIndex0_ = -1;
+    sampleTimeIndex1_ = -1;
+    sampleTimeIndex2_ = -1;
+    sampleTimeIndex3_ = -1;
 }
 
 
@@ -563,10 +697,14 @@ void Foam::spaceTimeWindowFvPatchField<Type>::rmap
     fixedValueFvPatchField<Type>::rmap(ptf, addr);
 
     // Clear cached data
-    startSampledValues_.clear();
-    endSampledValues_.clear();
-    startSampleTime_ = -1;
-    endSampleTime_ = -1;
+    sampledValues0_.clear();
+    sampledValues1_.clear();
+    sampledValues2_.clear();
+    sampledValues3_.clear();
+    sampleTimeIndex0_ = -1;
+    sampleTimeIndex1_ = -1;
+    sampleTimeIndex2_ = -1;
+    sampleTimeIndex3_ = -1;
 }
 
 
@@ -589,27 +727,129 @@ void Foam::spaceTimeWindowFvPatchField<Type>::updateCoeffs()
     // Compute interpolated values
     Field<Type>& patchValues = *this;
 
-    if (startSampleTime_ == endSampleTime_)
+    // Get bracketing times t1 and t2 (currentTime is between them)
+    const scalar t1 = sampleTimes_[sampleTimeIndex1_].value();
+    const scalar t2 = sampleTimes_[sampleTimeIndex2_].value();
+
+    if (sampleTimeIndex1_ == sampleTimeIndex2_)
     {
         // No interpolation needed - exact time match or at boundary
-        patchValues = startSampledValues_ + offset_;
+        patchValues = sampledValues1_ + offset_;
     }
     else
     {
-        // Linear temporal interpolation
-        const scalar t0 = sampleTimes_[startSampleTime_].value();
-        const scalar t1 = sampleTimes_[endSampleTime_].value();
-        const scalar alpha = (currentTime - t0) / (t1 - t0 + SMALL);
+        // Time does not exactly match a sample time
+        // Check if interpolation is allowed
+        if (!allowTimeInterpolation_)
+        {
+            // Use tolerance based on deltaT (1% of timestep interval)
+            const scalar timeTol = 0.01 * (t2 - t1);
 
-        patchValues =
-            (1.0 - alpha) * startSampledValues_
-          + alpha * endSampledValues_
-          + offset_;
+            // Check if we're close enough to t1 or t2 to consider it a match
+            const bool closeToT1 = (mag(currentTime - t1) <= timeTol);
+            const bool closeToT2 = (mag(currentTime - t2) <= timeTol);
 
-        DebugInfo
-            << "Time interpolation: t=" << currentTime
-            << " between " << t0 << " and " << t1
-            << " alpha=" << alpha << endl;
+            if (!closeToT1 && !closeToT2)
+            {
+                FatalErrorInFunction
+                    << "Current time " << currentTime
+                    << " does not match any available sample time." << nl
+                    << "    Nearest lower sample: " << t1 << nl
+                    << "    Nearest upper sample: " << t2 << nl
+                    << "    Patch: " << this->patch().name() << nl << nl
+                    << "    Time interpolation is disabled (allowTimeInterpolation = false)." << nl
+                    << "    This BC requires exact timestep matching with the extraction." << nl << nl
+                    << "    Options:" << nl
+                    << "      1. Ensure reconstruction uses identical deltaT as extraction" << nl
+                    << "      2. Set allowTimeInterpolation = true in the BC configuration" << nl
+                    << "         to permit linear interpolation between available timesteps" << nl
+                    << exit(FatalError);
+            }
+
+            // Close enough to t1 or t2 - use the nearest without interpolation
+            if (closeToT2)
+            {
+                patchValues = sampledValues2_ + offset_;
+            }
+            else
+            {
+                patchValues = sampledValues1_ + offset_;
+            }
+        }
+        else
+        {
+            // Temporal interpolation is allowed
+            const scalar alpha = (currentTime - t1) / (t2 - t1 + SMALL);
+
+            // Check if cubic interpolation is possible and requested
+            // Cubic requires 4 distinct points; if i0==i1 or i2==i3, fall back to linear
+            const bool useCubic =
+                (timeInterpolationScheme_ == timeInterpScheme::CUBIC)
+             && (sampleTimeIndex0_ != sampleTimeIndex1_)
+             && (sampleTimeIndex2_ != sampleTimeIndex3_);
+
+            if (useCubic)
+            {
+                // Centripetal Catmull-Rom cubic spline interpolation (per-face)
+                // Get all 4 time values for proper non-uniform spacing handling
+                const scalar t0 = sampleTimes_[sampleTimeIndex0_].value();
+                const scalar t3 = sampleTimes_[sampleTimeIndex3_].value();
+
+                patchValues.setSize(sampledValues1_.size());
+
+                forAll(patchValues, facei)
+                {
+                    patchValues[facei] = catmullRomCentripetal
+                    (
+                        sampledValues0_[facei],
+                        sampledValues1_[facei],
+                        sampledValues2_[facei],
+                        sampledValues3_[facei],
+                        t0, t1, t2, t3,
+                        currentTime
+                    ) + offset_;
+                }
+
+                DebugInfo
+                    << "Cubic time interpolation (centripetal): t=" << currentTime
+                    << " using t0=" << t0 << " t1=" << t1
+                    << " t2=" << t2 << " t3=" << t3 << endl;
+            }
+            else
+            {
+                // Linear temporal interpolation
+                patchValues =
+                    (1.0 - alpha) * sampledValues1_
+                  + alpha * sampledValues2_
+                  + offset_;
+
+                DebugInfo
+                    << "Linear time interpolation: t=" << currentTime
+                    << " between " << t1 << " and " << t2
+                    << " alpha=" << alpha << endl;
+            }
+        }
+    }
+
+    // Report flux through patch (vector fields only, i.e., velocity)
+    if (reportFlux_)
+    {
+        if constexpr (std::is_same_v<Type, vector>)
+        {
+            // Compute flux: phi = U & Sf (face area vector)
+            const vectorField& Sf = this->patch().Sf();
+            const scalarField flux(patchValues & Sf);
+            const scalar netFlux = gSum(flux);
+            const scalar inFlux = gSum(neg(flux) * flux);   // negative = into domain
+            const scalar outFlux = gSum(pos(flux) * flux);  // positive = out of domain
+
+            Info<< "spaceTimeWindow flux report [" << this->patch().name() << "]"
+                << " t=" << this->db().time().value()
+                << " fixesValue=" << (fixesValue_ ? "true" : "false")
+                << " netFlux=" << netFlux
+                << " (in=" << inFlux << " out=" << outFlux << ")"
+                << endl;
+        }
     }
 
     fixedValueFvPatchField<Type>::updateCoeffs();
@@ -641,6 +881,23 @@ void Foam::spaceTimeWindowFvPatchField<Type>::write(Ostream& os) const
     if (!fixesValue_)
     {
         os.writeEntry("fixesValue", fixesValue_);
+    }
+
+    if (allowTimeInterpolation_)
+    {
+        os.writeEntry("allowTimeInterpolation", allowTimeInterpolation_);
+
+        // Only write scheme if interpolation is enabled (otherwise irrelevant)
+        if (timeInterpolationScheme_ == timeInterpScheme::CUBIC)
+        {
+            os.writeEntry("timeInterpolationScheme", "cubic");
+        }
+        // Don't write "linear" - it's the default
+    }
+
+    if (reportFlux_)
+    {
+        os.writeEntry("reportFlux", reportFlux_);
     }
 }
 

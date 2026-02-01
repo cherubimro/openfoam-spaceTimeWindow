@@ -86,13 +86,36 @@ void Foam::functionObjects::spaceTimeWindowExtract::initializeSubset()
 
     Info<< "    Extraction box: " << bb.min() << " to " << bb.max() << endl;
 
-    // Find cells whose centres are inside the box (local to this processor)
+    // Find cells where ALL vertices are inside the box (local to this processor)
+    // This ensures fvMeshSubset produces topologically valid cells
+    // (no partial cells at boundaries that cause checkMesh failures)
+    const pointField& points = mesh_.points();
+    const cellList& cells = mesh_.cells();
+    const faceList& faces = mesh_.faces();
     const vectorField& cellCentres = mesh_.cellCentres();
     labelList cellsInBox;
 
-    forAll(cellCentres, celli)
+    forAll(cells, celli)
     {
-        if (bb.contains(cellCentres[celli]))
+        const cell& c = cells[celli];
+        bool allVerticesInside = true;
+
+        // Check all vertices of all faces of this cell
+        for (const label facei : c)
+        {
+            const face& f = faces[facei];
+            for (const label pointi : f)
+            {
+                if (!bb.contains(points[pointi]))
+                {
+                    allVerticesInside = false;
+                    break;
+                }
+            }
+            if (!allVerticesInside) break;
+        }
+
+        if (allVerticesInside)
         {
             cellsInBox.append(celli);
         }

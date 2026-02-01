@@ -1169,13 +1169,35 @@ int main(int argc, char *argv[])
 
         Info<< "    Source mesh has " << sourceMesh.nCells() << " cells" << endl;
 
-        // Find cells inside the box
-        const vectorField& cellCentres = sourceMesh.cellCentres();
+        // Find cells where ALL vertices are inside the box
+        // This ensures fvMeshSubset produces topologically valid cells
+        // (no partial cells at boundaries that cause checkMesh failures)
+        const pointField& points = sourceMesh.points();
+        const cellList& cells = sourceMesh.cells();
+        const faceList& faces = sourceMesh.faces();
         labelList cellsInBox;
 
-        forAll(cellCentres, celli)
+        forAll(cells, celli)
         {
-            if (bb.contains(cellCentres[celli]))
+            const cell& c = cells[celli];
+            bool allVerticesInside = true;
+
+            // Check all vertices of all faces of this cell
+            for (const label facei : c)
+            {
+                const face& f = faces[facei];
+                for (const label pointi : f)
+                {
+                    if (!bb.contains(points[pointi]))
+                    {
+                        allVerticesInside = false;
+                        break;
+                    }
+                }
+                if (!allVerticesInside) break;
+            }
+
+            if (allVerticesInside)
             {
                 cellsInBox.append(celli);
             }

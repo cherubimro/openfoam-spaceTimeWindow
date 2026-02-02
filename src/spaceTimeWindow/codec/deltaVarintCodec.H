@@ -174,6 +174,11 @@ public:
         //- Check if buffer is in delta-varint format (by magic number)
         static bool isDeltaVarintBuffer(const std::vector<uint8_t>& buf);
 
+        //- Check if file contains vector field (3 components) vs scalar (1 component)
+        //  Returns true if nComponents == 3, false otherwise
+        //  Assumes file is valid DVZ format (check with isDeltaVarintFile first)
+        static bool isVectorField(const fileName& path);
+
         //- Get file extension for compressed files
         static word fileExtension()
         {

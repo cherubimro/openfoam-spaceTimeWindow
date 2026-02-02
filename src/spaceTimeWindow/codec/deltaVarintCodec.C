@@ -613,4 +613,35 @@ bool Foam::deltaVarintCodec::isDeltaVarintBuffer(const std::vector<uint8_t>& buf
 }
 
 
+bool Foam::deltaVarintCodec::isVectorField(const fileName& path)
+{
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.good())
+    {
+        return false;
+    }
+
+    // Read header: magic (4) + nElements (4) + nComponents (4)
+    uint8_t header[12];
+    ifs.read(reinterpret_cast<char*>(header), 12);
+
+    if (!ifs.good() || ifs.gcount() != 12)
+    {
+        return false;
+    }
+
+    // Check magic number
+    uint32_t magic = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
+    if (magic != MAGIC)
+    {
+        return false;
+    }
+
+    // Read nComponents (bytes 8-11)
+    uint32_t nComponents = header[8] | (header[9] << 8) | (header[10] << 16) | (header[11] << 24);
+
+    return (nComponents == 3);
+}
+
+
 // ************************************************************************* //

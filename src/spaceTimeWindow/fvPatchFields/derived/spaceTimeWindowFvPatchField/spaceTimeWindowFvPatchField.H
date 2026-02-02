@@ -99,6 +99,8 @@ SourceFiles
 
 #include "fixedValueFvPatchFields.H"
 #include "instantList.H"
+#include "spatialInterpolation2D.H"
+#include "boundBox.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -173,6 +175,15 @@ private:
         //- Whether metadata has been validated
         mutable bool metadataValidated_;
 
+        //- Spatial interpolation helper (for multi-resolution support)
+        mutable autoPtr<spatialInterpolation2D> spatialInterpPtr_;
+
+        //- Bounding box for spatial interpolation
+        mutable boundBox boundingBox_;
+
+        //- Whether spatial interpolation has been initialized
+        mutable bool spatialInterpInitialized_;
+
 
     // Private Member Functions
 
@@ -187,6 +198,11 @@ private:
 
         //- Validate extraction metadata against current time settings
         void validateMetadata() const;
+
+        //- Initialize spatial interpolation if needed (for multi-resolution)
+        //  Reads source points from boundaryData, compares with patch face centers,
+        //  and sets up interpolation (barycentric for refinement, area-weighted for coarsening)
+        void initSpatialInterpolation() const;
 
         //- Centripetal Catmull-Rom cubic spline interpolation
         //  Returns interpolated value at time t between t1 and t2

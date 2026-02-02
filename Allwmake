@@ -50,10 +50,16 @@ if [ -n "$FOAM_USE_SODIUM" ]; then
     wmake src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowKeygen
 fi
 
+# Build the compareDvz utility (debug/testing tool)
+echo ""
+echo "Building compareDvz utility..."
+wmake src/spaceTimeWindow/utilities/compareDvz
+
 echo ""
 echo "Build complete."
 echo "Library: \$FOAM_USER_LIBBIN/libspaceTimeWindow.so"
 echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowInitCase"
+echo "Utility: \$FOAM_USER_APPBIN/compareDvz"
 if [ -n "$FOAM_USE_SODIUM" ]; then
     echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowKeygen"
     echo "Encryption: enabled"

@@ -116,7 +116,7 @@ In parallel mode:
 
 | Mode | Start Time | Timesteps Used | Use Case |
 |------|------------|----------------|----------|
-| `none` (exact) | t_0 | 1 (exact match) | Bit-reproducible results |
+| `none` (exact) | t_0 | 1 (exact match) | "Bit"-reproducible results |
 | `linear` | t_1 | 2 (bracketing) | Simple, smoothly varying flows |
 | `cubic` | t_2 | 4 (Catmull-Rom) | Unsteady turbulent flows (recommended) |
 
@@ -490,6 +490,58 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 # Enter private key (base64):
 ```
 
+### Secure Key Storage
+
+The private key should be stored securely:
+- **Hardware security keys**: YubiKey, Nitrokey, or similar FIDO2/PIV-capable devices (strongest protection)
+- **Secure password managers**: KeePassXC, 1Password, Bitwarden with strong master passwords
+- **Encrypted vaults**: GPG-encrypted files or OS keychains (macOS Keychain, GNOME Keyring)
+
+**Warning**: Never commit the private key to version control.
+
+### Ethical Considerations and HPC Transparency
+
+Most high-performance computing (HPC) centers require full transparency regarding simulations performed on their infrastructure. For this reason, **encryption support is an optional compile-time feature** controlled by the `FOAM_USE_SODIUM` flag. Centers may choose not to enable this functionality.
+
+**What encryption protects:**
+- The time-varying boundary field data stored in `constant/boundaryData`. When downloaded to a client workstation, this information is sealed and cannot be read without the private key.
+
+**What encryption does NOT protect:**
+- The test case setup (mesh, dictionaries, initial conditions) remains unencrypted. Anyone can re-run the global simulation to regenerate the boundary data - encryption does not prevent this.
+
+**Practical security model:**
+
+1. Re-running the global simulation to obtain internal fields is **computationally expensive** and requires HPC resources. Such jobs are recorded in scheduler logs, providing an audit trail.
+2. Offline recalculation on a personal workstation is typically infeasible due to computational cost.
+3. If file permissions on HPC scratch directories are misconfigured and the user chooses not to write timestep data from the global simulation, other users can only copy the unencrypted test case setup - not the valuable boundary data.
+
+**Note**: The encryption feature is designed for protecting intellectual property during data distribution, not for hiding simulations from HPC administrators. Always comply with your computing center's acceptable use policies.
+
+### Protection Against Malware and Ransomware
+
+The spaceTimeWindow approach offers an additional security benefit: by storing only the minimal data required for reconstruction, the valuable simulation results can be protected against malware and ransomware attacks.
+
+**Secure archival strategy:**
+
+The reconstruction case contains only:
+- The subset mesh (`constant/polyMesh`)
+- Encrypted boundary data (`constant/boundaryData/*.enc`)
+- Initial fields for one timestep
+- Configuration dictionaries
+
+This minimal dataset (typically a few gigabytes) can be stored on:
+- **Write-Once Read-Many (WORM) media**: M-DISC, tape archives, or cloud storage with object lock (AWS S3 Object Lock, Azure Immutable Blob Storage)
+- **Secure vaults**: Hardware-encrypted drives kept offline
+- **Air-gapped backups**: Disconnected storage unreachable by network-based malware
+
+**Security model:**
+1. Encrypted boundary data on WORM storage cannot be modified or deleted by malware
+2. Private key stored separately (hardware token or password manager), not on the same system
+3. Reconstruction always possible - archived data remains intact even if systems are compromised
+4. Small archive size makes backup and verification practical, unlike terabyte-scale full simulation outputs
+
+**Tip**: For critical simulations, archive the encrypted reconstruction case to WORM storage immediately after extraction. The full simulation data can then be deleted from HPC scratch space.
+
 ## Building
 
 ```bash
@@ -528,10 +580,14 @@ API documentation can be generated with Doxygen:
 
 ## Example Case
 
-The `examples/ufr2-02` directory contains a complete LES test case:
+The `examples/ufr2-02` directory contains a complete LES test case based on the ERCOFTAC Classic Collection Database Case 043:
 
-- **Case**: ERCOFTAC UFR2-02 - Flow around a square cylinder at Re = 22,000
+- **Case**: ERCOFTAC UFR2-02 - Flow around a square cylinder at Re = 21,400
 - **Reference**: Lyn et al. (1995) J. Fluid Mech. 304, 285-319
+- **Mesh**: Based on the mesh generation script by Niklas Nordin from the [OpenFOAM Wiki UFR2-02 Benchmark](https://openfoamwiki.net/index.php?title=Benchmark_ercoftac_ufr2-02)
+- **ERCOFTAC Database**: http://cfd.mace.manchester.ac.uk/ercoftac/ (Case 043)
+
+The case demonstrates vortex shedding from a square cylinder with a von Karman vortex street in the wake region - an ideal scenario for space-time window extraction since the extraction box can capture the wake dynamics while excluding the cylinder and inlet regions.
 
 ```bash
 cd examples/ufr2-02
@@ -544,6 +600,12 @@ cd examples/ufr2-02
 - No temporal extrapolation - boundary data must cover full reconstruction time range
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`
+
+## Acknowledgments
+
+The example case mesh generation is based on the work of **Niklas Nordin**, as documented in the [OpenFOAM Wiki UFR2-02 Benchmark](https://openfoamwiki.net/index.php?title=Benchmark_ercoftac_ufr2-02). The test case uses data from the **ERCOFTAC Classic Collection Database** (Case 043), available at http://cfd.mace.manchester.ac.uk/ercoftac/.
+
+This library was developed at Politehnica University of Timisoara.
 
 ## References
 

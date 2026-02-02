@@ -85,6 +85,8 @@ SourceFiles
 
 #include "mixedFvPatchFields.H"
 #include "instantList.H"
+#include "barycentric2D.H"
+#include "triangle.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -151,8 +153,45 @@ private:
         //- Whether metadata has been validated
         mutable bool metadataValidated_;
 
+        //- Spatial coarsening factor (1 = no coarsening, 2 = 2:1 in each dim)
+        mutable label spatialCoarsenFactor_;
+
+        //- Mapping from fine boundary data faces to coarse mesh faces
+        //  coarseToFineMap_[coarseFaceI] = list of fine face indices
+        mutable List<labelList> coarseToFineMap_;
+
+        //- Whether spatial mapping has been initialized
+        mutable bool spatialMapInitialized_;
+
+        //- Refinement mode: coarse boundaryData to fine mesh interpolation
+        //  For each fine face, stores: triangle vertex indices and weights
+        mutable bool refinementMode_;
+
+        //- Coarse points from boundaryData (only stored in refinement mode)
+        mutable vectorField coarsePoints_;
+
+        //- Triangle vertex indices for refinement interpolation
+        //  triangles_[triI] = FixedList<label, 3> with 3 coarse point indices
+        mutable List<FixedList<label, 3>> triangles_;
+
+        //- Triangle index for each fine face
+        mutable labelList fineToTriangle_;
+
+        //- Barycentric weights for each fine face
+        mutable List<barycentric2D> fineBaryWeights_;
+
 
     // Private Member Functions
+
+        //- Initialize spatial coarsening map if needed
+        void initSpatialCoarseningMap() const;
+
+        //- Build Delaunay triangulation for refinement interpolation
+        void buildRefinementTriangulation
+        (
+            const vectorField& coarsePoints,
+            const vectorField& finePoints
+        ) const;
 
         //- Find available time directories
         void findSampleTimes() const;

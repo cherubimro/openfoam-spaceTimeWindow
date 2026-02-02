@@ -51,6 +51,7 @@ Usage
 #include "OFstream.H"
 #include "volFields.H"
 #include "surfaceFields.H"
+#include "zeroGradientFvPatchFields.H"
 #include "OSspecific.H"
 #include "foamVersion.H"
 #include "Tuple2.H"
@@ -60,6 +61,10 @@ Usage
 #include "deltaVarintCodec.H"
 #include "deltaVarintTemporalCodec.H"
 #include "sodiumCrypto.H"
+#include "multiDirRefinement.H"
+#include "cellShape.H"
+#include "cellModel.H"
+#include "polyMesh.H"
 #include <fstream>
 #include <sstream>
 
@@ -957,6 +962,22 @@ int main(int argc, char *argv[])
         "Default: same as fields in boundaryData"
     );
 
+    argList::addOption
+    (
+        "refineLevel",
+        "N",
+        "Refine mesh N times after creating subset mesh. "
+        "The spaceTimeWindow BC handles spatial interpolation of boundaryData at runtime."
+    );
+
+    argList::addOption
+    (
+        "coarsenLevel",
+        "N",
+        "Coarsen mesh N times after creating subset mesh. "
+        "The spaceTimeWindow BC handles spatial interpolation of boundaryData at runtime."
+    );
+
     argList::noParallel();
     argList::noFunctionObjects();
 
@@ -1028,6 +1049,33 @@ int main(int argc, char *argv[])
         hasUserInitialFields = true;
     }
 
+    // Mesh refinement/coarsening options
+    label refineLevel = args.getOrDefault<label>("refineLevel", 0);
+    label coarsenLevel = args.getOrDefault<label>("coarsenLevel", 0);
+
+    // Validate: cannot use both refine and coarsen
+    if (refineLevel > 0 && coarsenLevel > 0)
+    {
+        FatalErrorInFunction
+            << "Cannot use both -refineLevel and -coarsenLevel" << nl
+            << "Choose one or the other." << nl
+            << exit(FatalError);
+    }
+
+    // Validate: levels must be positive
+    if (refineLevel < 0)
+    {
+        FatalErrorInFunction
+            << "-refineLevel must be >= 0, got " << refineLevel << nl
+            << exit(FatalError);
+    }
+    if (coarsenLevel < 0)
+    {
+        FatalErrorInFunction
+            << "-coarsenLevel must be >= 0, got " << coarsenLevel << nl
+            << exit(FatalError);
+    }
+
     Info<< "spaceTimeWindowInitCase" << nl
         << "    Source case:    " << sourceCase << nl
         << "    Extract dir:    " << extractDir << nl;
@@ -1050,6 +1098,16 @@ int main(int argc, char *argv[])
     if (hasUserInitialFields)
     {
         Info<< "    Initial fields: " << userInitialFields << nl;
+    }
+    if (refineLevel > 0)
+    {
+        Info<< "    Mesh refinement: " << refineLevel << " level(s)" << nl
+            << "        Boundary data interpolation: barycentric (handled by BC at runtime)" << nl;
+    }
+    if (coarsenLevel > 0)
+    {
+        Info<< "    Mesh coarsening: " << coarsenLevel << " level(s)" << nl
+            << "        Boundary data interpolation: area-weighted (handled by BC at runtime)" << nl;
     }
     Info<< endl;
 
@@ -1715,6 +1773,8 @@ int main(int argc, char *argv[])
                     // Get all field files in this time directory
                     fileNameList fieldFiles = readDir(timeDir, fileName::FILE);
 
+                    const word dvzExt = "." + deltaVarintCodec::fileExtension();
+
                     for (const fileName& fieldFile : fieldFiles)
                     {
                         // Skip metadata
@@ -1725,6 +1785,71 @@ int main(int argc, char *argv[])
 
                         fileName fieldPath = timeDir / fieldFile;
 
+                        // Check if this is a .dvz file (delta-varint compressed)
+                        if (fieldFile.ends_with(dvzExt))
+                        {
+                            // Handle .dvz compressed file
+                            // Read using deltaVarintCodec, detect type from header
+                            if (deltaVarintCodec::isDeltaVarintFile(fieldPath))
+                            {
+                                // Detect field type from DVZ header
+                                bool isVector = deltaVarintCodec::isVectorField(fieldPath);
+
+                                if (isVector)
+                                {
+                                    vectorField fullField = deltaVarintCodec::readVector(fieldPath);
+
+                                    if (fullField.size() != nTotalBndFaces)
+                                    {
+                                        WarningInFunction
+                                            << "Field " << fieldFile << " has " << fullField.size()
+                                            << " values but expected " << nTotalBndFaces << nl
+                                            << "    Skipping..." << endl;
+                                        continue;
+                                    }
+
+                                    vectorField reducedField(inletFaceIndices.size());
+                                    forAll(inletFaceIndices, i)
+                                    {
+                                        reducedField[i] = fullField[inletFaceIndices[i]];
+                                    }
+
+                                    // Write back as .dvz
+                                    deltaVarintCodec::write(fieldPath, reducedField);
+                                }
+                                else
+                                {
+                                    scalarField fullField = deltaVarintCodec::readScalar(fieldPath);
+
+                                    if (fullField.size() != nTotalBndFaces)
+                                    {
+                                        WarningInFunction
+                                            << "Field " << fieldFile << " has " << fullField.size()
+                                            << " values but expected " << nTotalBndFaces << nl
+                                            << "    Skipping..." << endl;
+                                        continue;
+                                    }
+
+                                    scalarField reducedField(inletFaceIndices.size());
+                                    forAll(inletFaceIndices, i)
+                                    {
+                                        reducedField[i] = fullField[inletFaceIndices[i]];
+                                    }
+
+                                    // Write back as .dvz
+                                    deltaVarintCodec::write(fieldPath, reducedField);
+                                }
+                            }
+                            else
+                            {
+                                WarningInFunction
+                                    << "File " << fieldFile << " has .dvz extension but is not valid DVZ format" << nl
+                                    << "    Skipping..." << endl;
+                            }
+                            continue;
+                        }
+
+                        // Handle raw OpenFOAM format file
                         // Read the file content to determine field type and read data
                         std::ifstream ifs(fieldPath.c_str());
                         std::string content((std::istreambuf_iterator<char>(ifs)),
@@ -2615,6 +2740,1182 @@ int main(int argc, char *argv[])
 
     // Note: All fields in the initial time directory are now handled by the loop above.
     // Fields with boundaryData get spaceTimeWindow BC; fields without get zeroGradient.
+
+    // Mesh refinement (optional)
+    // The spaceTimeWindow BC handles spatial interpolation automatically at runtime
+    // when boundaryData resolution differs from mesh resolution
+    if (refineLevel > 0)
+    {
+        Info<< nl << "========================================" << nl
+            << "Applying mesh refinement (" << refineLevel << " levels)..." << nl
+            << "========================================" << nl << endl;
+
+        // Create a Time object for the extract case to properly manage the mesh
+        // Split extractDir into rootPath and caseName for Time constructor
+        fileName extractRootPath = extractDir.path();
+        fileName extractCaseName = extractDir.name();
+
+        Time extractTime
+        (
+            Time::controlDictName,
+            extractRootPath,
+            extractCaseName,
+            false,  // enableFunctionObjects
+            false   // enableLibs
+        );
+
+        // Set time to the initial field directory
+        extractTime.setTime(readScalar(initialTimeDir), 0);
+
+        // Load the mesh as fvMesh for field operations
+        fvMesh refineMesh
+        (
+            IOobject
+            (
+                fvMesh::defaultRegion,
+                extractTime.constant(),
+                extractTime,
+                IOobject::MUST_READ
+            )
+        );
+
+        label originalNCells = refineMesh.nCells();
+        Info<< "  Original mesh: " << originalNCells << " cells, "
+            << refineMesh.nFaces() << " faces" << endl;
+
+        // Read original field values before refinement
+        // We'll map these to the refined mesh using addedCells()
+        Info<< "  Reading original field values..." << endl;
+
+        // Discover fields in initial time directory
+        fileNameList fieldFiles = readDir(extractDir / initialTimeDir, fileName::FILE);
+
+        // Store original internal field values and dimensions
+        HashTable<scalarField> origScalarFields;
+        HashTable<vectorField> origVectorFields;
+        HashTable<dimensionSet> scalarDimensions;
+        HashTable<dimensionSet> vectorDimensions;
+
+        for (const fileName& fieldFile : fieldFiles)
+        {
+            if (fieldFile.ends_with("~") || fieldFile == "uniform")
+            {
+                continue;
+            }
+
+            fileName fieldPath = extractDir / initialTimeDir / fieldFile;
+
+            // Read file header to determine type
+            // Use IOobject to properly read just the header
+            IOobject fieldIO
+            (
+                fieldFile,
+                extractTime.timeName(),
+                refineMesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE
+            );
+
+            if (!fieldIO.typeHeaderOk<IOobject>(false))
+            {
+                continue;
+            }
+
+            word fieldClass = fieldIO.headerClassName();
+
+            if (fieldClass == "volScalarField")
+            {
+                IOobject sfIO
+                (
+                    fieldFile,
+                    extractTime.timeName(),
+                    refineMesh,
+                    IOobject::MUST_READ,
+                    IOobject::NO_WRITE
+                );
+
+                if (sfIO.typeHeaderOk<volScalarField>(false))
+                {
+                    volScalarField sf(sfIO, refineMesh);
+                    origScalarFields.insert(fieldFile, sf.primitiveField());
+                    scalarDimensions.insert(fieldFile, sf.dimensions());
+                    Info<< "    Read scalar field: " << fieldFile
+                        << " (" << sf.size() << " values)" << endl;
+                }
+            }
+            else if (fieldClass == "volVectorField")
+            {
+                IOobject vfIO
+                (
+                    fieldFile,
+                    extractTime.timeName(),
+                    refineMesh,
+                    IOobject::MUST_READ,
+                    IOobject::NO_WRITE
+                );
+
+                if (vfIO.typeHeaderOk<volVectorField>(false))
+                {
+                    volVectorField vf(vfIO, refineMesh);
+                    origVectorFields.insert(fieldFile, vf.primitiveField());
+                    vectorDimensions.insert(fieldFile, vf.dimensions());
+                    Info<< "    Read vector field: " << fieldFile
+                        << " (" << vf.size() << " values)" << endl;
+                }
+            }
+        }
+
+        // Build cumulative cell mapping: newCell -> originalCell
+        // Start with identity mapping
+        labelList newToOrig = identity(originalNCells);
+
+        // Apply refinement N times, updating the mapping each time
+        for (label level = 1; level <= refineLevel; ++level)
+        {
+            Info<< "  Refinement level " << level << "/" << refineLevel << "..." << endl;
+
+            label nCellsBefore = refineMesh.nCells();
+
+            // Select all cells for refinement
+            labelList refCells = identity(nCellsBefore);
+
+            // Build refinement dictionary for 3D uniform refinement
+            dictionary refineDict;
+
+            if (refineMesh.nGeometricD() == 3)
+            {
+                // 3D case - refine all directions
+                wordList directions(3);
+                directions[0] = "tan1";
+                directions[1] = "tan2";
+                directions[2] = "normal";
+                refineDict.add("directions", directions);
+                refineDict.add("useHexTopology", "true");
+            }
+            else
+            {
+                // 2D case - determine which directions to refine
+                const Vector<label> dirs(refineMesh.geometricD());
+                wordList directions(2);
+
+                if (dirs.x() == -1)
+                {
+                    directions[0] = "tan2";
+                    directions[1] = "normal";
+                }
+                else if (dirs.y() == -1)
+                {
+                    directions[0] = "tan1";
+                    directions[1] = "normal";
+                }
+                else
+                {
+                    directions[0] = "tan1";
+                    directions[1] = "tan2";
+                }
+
+                refineDict.add("directions", directions);
+                refineDict.add("useHexTopology", "false");
+            }
+
+            refineDict.add("coordinateSystem", "global");
+
+            dictionary coeffsDict;
+            coeffsDict.add("tan1", vector(1, 0, 0));
+            coeffsDict.add("tan2", vector(0, 1, 0));
+            refineDict.add("globalCoeffs", coeffsDict);
+
+            refineDict.add("geometricCut", "false");
+            refineDict.add("writeMesh", "false");
+
+            // Apply refinement
+            multiDirRefinement multiRef(refineMesh, refCells, refineDict);
+
+            // Get the cell mapping: oldCell -> list of new cells (children)
+            const labelListList& addedCells = multiRef.addedCells();
+
+            // Update newToOrig mapping for the new cells
+            // addedCells[oldCelli] contains the children of oldCelli
+            // Each child should map to the same original cell as oldCelli
+            label nCellsAfter = refineMesh.nCells();
+            labelList updatedNewToOrig(nCellsAfter);
+
+            forAll(addedCells, oldCelli)
+            {
+                const labelList& children = addedCells[oldCelli];
+                label origCelli = newToOrig[oldCelli];
+
+                if (children.size() > 0)
+                {
+                    // Cell was refined - all children map to the same original
+                    for (label childCelli : children)
+                    {
+                        updatedNewToOrig[childCelli] = origCelli;
+                    }
+                }
+                else
+                {
+                    // Cell was not refined - keep same mapping
+                    updatedNewToOrig[oldCelli] = origCelli;
+                }
+            }
+
+            newToOrig = updatedNewToOrig;
+
+            Info<< "    Mesh now has " << nCellsAfter << " cells" << endl;
+        }
+
+        // Write the refined mesh (overwrite)
+        refineMesh.setInstance(extractTime.constant());
+        refineMesh.write();
+
+        Info<< nl << "  Mapping fields to refined mesh (piecewise constant)..." << endl;
+
+        // Map fields using newToOrig mapping (conservative piecewise constant)
+        label finalNCells = refineMesh.nCells();
+
+        // Map and write scalar fields
+        forAllConstIters(origScalarFields, iter)
+        {
+            const word& fieldName = iter.key();
+            const scalarField& origField = iter.val();
+
+            // Create mapped field
+            scalarField mappedField(finalNCells);
+            forAll(mappedField, celli)
+            {
+                mappedField[celli] = origField[newToOrig[celli]];
+            }
+
+            // Create new field with zeroGradient BC (same as was written initially)
+            volScalarField sf
+            (
+                IOobject
+                (
+                    fieldName,
+                    extractTime.timeName(),
+                    refineMesh,
+                    IOobject::NO_READ,
+                    IOobject::AUTO_WRITE
+                ),
+                refineMesh,
+                dimensionedScalar(fieldName, scalarDimensions[fieldName], 0),
+                zeroGradientFvPatchScalarField::typeName
+            );
+
+            // Set internal field
+            sf.primitiveFieldRef() = mappedField;
+            sf.correctBoundaryConditions();
+            sf.write();
+
+            Info<< "    Mapped: " << fieldName << " (scalar, "
+                << origField.size() << " -> " << mappedField.size() << " cells)" << endl;
+        }
+
+        // Map and write vector fields
+        forAllConstIters(origVectorFields, iter)
+        {
+            const word& fieldName = iter.key();
+            const vectorField& origField = iter.val();
+
+            // Create mapped field
+            vectorField mappedField(finalNCells);
+            forAll(mappedField, celli)
+            {
+                mappedField[celli] = origField[newToOrig[celli]];
+            }
+
+            // Create new field with zeroGradient BC (same as was written initially)
+            volVectorField vf
+            (
+                IOobject
+                (
+                    fieldName,
+                    extractTime.timeName(),
+                    refineMesh,
+                    IOobject::NO_READ,
+                    IOobject::AUTO_WRITE
+                ),
+                refineMesh,
+                dimensionedVector(fieldName, vectorDimensions[fieldName], Zero),
+                zeroGradientFvPatchVectorField::typeName
+            );
+
+            // Set internal field
+            vf.primitiveFieldRef() = mappedField;
+            vf.correctBoundaryConditions();
+            vf.write();
+
+            Info<< "    Mapped: " << fieldName << " (vector, "
+                << origField.size() << " -> " << mappedField.size() << " cells)" << endl;
+        }
+
+        Info<< nl << "  Mesh refinement complete." << nl
+            << "  Final mesh: " << refineMesh.nCells() << " cells, "
+            << refineMesh.nFaces() << " faces" << nl
+            << "  Fields mapped using piecewise constant interpolation (conservative)." << nl
+            << "  The spaceTimeWindow BC will interpolate boundaryData" << nl
+            << "  to the finer mesh faces using barycentric interpolation." << nl << endl;
+
+        // Re-apply boundary conditions after refinement
+        // The mapped fields were written with zeroGradient, now apply proper BCs
+        Info<< "  Re-applying boundary conditions after refinement..." << endl;
+
+        for (const word& fieldName : initialFields)
+        {
+            fileName fieldPath = extractDir / initialTimeDir / fieldName;
+            if (!isFile(fieldPath)) continue;
+
+            // Read the entire file
+            std::ifstream ifs(fieldPath.c_str());
+            std::ostringstream buffer;
+            buffer << ifs.rdbuf();
+            std::string content = buffer.str();
+            ifs.close();
+
+            // Determine field type from class in header
+            word fieldType = "scalar";
+            if (content.find("volVectorField") != std::string::npos)
+            {
+                fieldType = "vector";
+            }
+
+            // Check if field has time-varying BC data in boundaryData
+            bool fieldInBoundaryData = boundaryDataFields.found(fieldName);
+
+            // Find boundaryField section and replace
+            std::string searchBoundary = "boundaryField";
+            std::size_t boundaryPos = content.find(searchBoundary);
+
+            if (boundaryPos != std::string::npos)
+            {
+                std::size_t bfBraceStart = content.find('{', boundaryPos);
+                if (bfBraceStart != std::string::npos)
+                {
+                    int braceCount = 1;
+                    std::size_t bfBraceEnd = bfBraceStart + 1;
+                    while (bfBraceEnd < content.size() && braceCount > 0)
+                    {
+                        if (content[bfBraceEnd] == '{') braceCount++;
+                        else if (content[bfBraceEnd] == '}') braceCount--;
+                        bfBraceEnd++;
+                    }
+
+                    std::string newBoundaryField = "boundaryField\n{\n    oldInternalFaces\n    {\n";
+                    word bcType;
+
+                    if (fieldInBoundaryData)
+                    {
+                        if (fieldType == "vector")
+                        {
+                            if (useInletOutletBC)
+                            {
+                                newBoundaryField += "        type            spaceTimeWindowInletOutlet;\n";
+                                newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                                newBoundaryField += "        phi             phi;\n";
+                                newBoundaryField += "        allowTimeInterpolation  true;\n";
+                                newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                                newBoundaryField += "        value           uniform (0 0 0);\n";
+                                bcType = "spaceTimeWindowInletOutlet";
+                            }
+                            else
+                            {
+                                newBoundaryField += "        type            spaceTimeWindow;\n";
+                                newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                                newBoundaryField += "        fixesValue      true;\n";
+                                newBoundaryField += "        value           uniform (0 0 0);\n";
+                                bcType = "spaceTimeWindow";
+                            }
+                        }
+                        else
+                        {
+                            if (useInletOutletBC)
+                            {
+                                newBoundaryField += "        type            zeroGradient;\n";
+                                bcType = "zeroGradient";
+                            }
+                            else
+                            {
+                                newBoundaryField += "        type            spaceTimeWindow;\n";
+                                newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                                newBoundaryField += "        fixesValue      true;\n";
+                                newBoundaryField += "        value           uniform 0;\n";
+                                bcType = "spaceTimeWindow";
+                            }
+                        }
+                    }
+                    else
+                    {
+                        newBoundaryField += "        type            zeroGradient;\n";
+                        bcType = "zeroGradient";
+                    }
+
+                    newBoundaryField += "    }\n}";
+
+                    content = content.substr(0, boundaryPos) + newBoundaryField + content.substr(bfBraceEnd);
+
+                    std::ofstream ofs(fieldPath.c_str());
+                    ofs << content;
+                    ofs.close();
+
+                    Info<< "    " << fieldName << " -> " << bcType << endl;
+                }
+            }
+        }
+    }
+
+    if (coarsenLevel > 0)
+    {
+        Info<< nl << "========================================" << nl
+            << "Applying mesh coarsening (" << coarsenLevel << " levels)..." << nl
+            << "========================================" << nl << endl;
+
+        // Create a Time object for the extract case to properly manage the mesh
+        // Split extractDir into rootPath and caseName for Time constructor
+        fileName extractRootPath = extractDir.path();
+        fileName extractCaseName = extractDir.name();
+
+        Time extractTime
+        (
+            Time::controlDictName,
+            extractRootPath,
+            extractCaseName,
+            false,  // enableFunctionObjects
+            false   // enableLibs
+        );
+
+        // Set time to the initial field directory
+        extractTime.setTime(readScalar(initialTimeDir), 0);
+
+        // Load the mesh
+        fvMesh fineMesh
+        (
+            IOobject
+            (
+                fvMesh::defaultRegion,
+                extractTime.constant(),
+                extractTime,
+                IOobject::MUST_READ
+            )
+        );
+
+        label originalNCells = fineMesh.nCells();
+        Info<< "  Original mesh: " << originalNCells << " cells, "
+            << fineMesh.nFaces() << " faces" << endl;
+
+        // Get bounding box
+        const boundBox& bb = fineMesh.bounds();
+        const vector span = bb.span();
+
+        // Detect structured mesh dimensions by finding nx, ny, nz that:
+        // 1. nx * ny * nz = nCells (exact)
+        // 2. Cell aspect ratio (dx:dy:dz) matches bounding box ratio (span.x:span.y:span.z)
+        //
+        // For uniform cells: dx = span.x/nx, dy = span.y/ny, dz = span.z/nz
+        // If cells are cubical: dx = dy = dz, so nx/span.x = ny/span.y = nz/span.z
+
+        label nx = 0, ny = 0, nz = 0;
+        bool foundDims = false;
+
+        // Find all divisors of nCells and check which combination gives correct aspect ratios
+        scalar bestError = GREAT;
+
+        // Calculate expected ratios for uniform cells
+        // If cell size is d: nx = span.x/d, ny = span.y/d, nz = span.z/d
+        // So: nx/ny = span.x/span.y, nx/nz = span.x/span.z
+        scalar ratioXY = span.x() / span.y();
+        scalar ratioXZ = span.x() / span.z();
+
+        Info<< "  Detecting structured mesh dimensions..." << nl
+            << "    Cell count: " << originalNCells << nl
+            << "    Box span: (" << span.x() << " " << span.y() << " " << span.z() << ")" << nl
+            << "    Expected ratios nx/ny=" << ratioXY << " nx/nz=" << ratioXZ << endl;
+
+        // Try all possible nx values (factors of nCells or divisors of ny*nz)
+        for (label tryNx = 1; tryNx <= originalNCells && tryNx*tryNx*tryNx <= originalNCells*10; ++tryNx)
+        {
+            if (originalNCells % tryNx != 0) continue;
+
+            label nyzProduct = originalNCells / tryNx;
+
+            // For each nx, try ny values
+            for (label tryNy = 1; tryNy <= nyzProduct && tryNy*tryNy <= nyzProduct*10; ++tryNy)
+            {
+                if (nyzProduct % tryNy != 0) continue;
+
+                label tryNz = nyzProduct / tryNy;
+
+                // Check aspect ratio error
+                scalar actualRatioXY = scalar(tryNx) / scalar(tryNy);
+                scalar actualRatioXZ = scalar(tryNx) / scalar(tryNz);
+
+                scalar errorXY = mag(actualRatioXY - ratioXY) / ratioXY;
+                scalar errorXZ = mag(actualRatioXZ - ratioXZ) / ratioXZ;
+                scalar totalError = errorXY + errorXZ;
+
+                if (totalError < bestError)
+                {
+                    bestError = totalError;
+                    nx = tryNx;
+                    ny = tryNy;
+                    nz = tryNz;
+                    foundDims = true;
+                }
+
+                // Perfect match (within tolerance)
+                if (totalError < 0.01)
+                {
+                    break;
+                }
+            }
+
+            if (bestError < 0.01) break;
+        }
+
+        if (!foundDims || nx * ny * nz != originalNCells)
+        {
+            FatalErrorInFunction
+                << "Could not determine structured mesh dimensions." << nl
+                << "Expected nx*ny*nz = " << originalNCells << nl
+                << "Best found: nx=" << nx << " ny=" << ny << " nz=" << nz
+                << " = " << nx*ny*nz << nl
+                << "Mesh coarsening requires a structured hexahedral mesh." << nl
+                << exit(FatalError);
+        }
+
+        if (bestError > 0.1)
+        {
+            WarningInFunction
+                << "Structured mesh dimensions found but aspect ratio error is high: "
+                << bestError*100 << "%" << nl
+                << "This may indicate a non-uniform mesh." << endl;
+        }
+
+        Info<< "  Detected structured mesh: " << nx << " x " << ny << " x " << nz
+            << " cells" << endl;
+
+        // Read original field values before coarsening
+        Info<< "  Reading original field values..." << endl;
+
+        fileNameList fieldFiles = readDir(extractDir / initialTimeDir, fileName::FILE);
+
+        HashTable<scalarField> origScalarFields;
+        HashTable<vectorField> origVectorFields;
+
+        for (const fileName& fieldFile : fieldFiles)
+        {
+            if (fieldFile.ends_with("~") || fieldFile == "uniform")
+            {
+                continue;
+            }
+
+            // Read header to determine field type
+            IOobject fieldIO
+            (
+                fieldFile,
+                extractTime.timeName(),
+                fineMesh,
+                IOobject::MUST_READ,
+                IOobject::NO_WRITE
+            );
+
+            if (!fieldIO.typeHeaderOk<IOobject>(false))
+            {
+                continue;
+            }
+
+            word headerClassName = fieldIO.headerClassName();
+
+            if (headerClassName == volScalarField::typeName)
+            {
+                volScalarField sf(fieldIO, fineMesh);
+                origScalarFields.insert(fieldFile, sf.primitiveField());
+                Info<< "    Read scalar field: " << fieldFile
+                    << " (" << sf.size() << " values)" << endl;
+            }
+            else if (headerClassName == volVectorField::typeName)
+            {
+                volVectorField vf(fieldIO, fineMesh);
+                origVectorFields.insert(fieldFile, vf.primitiveField());
+                Info<< "    Read vector field: " << fieldFile
+                    << " (" << vf.size() << " values)" << endl;
+            }
+        }
+
+        // Store original cell volumes for volume-weighted averaging
+        const scalarField& cellVolumes = fineMesh.V();
+
+        // Apply coarsening N times
+        label currNx = nx;
+        label currNy = ny;
+        label currNz = nz;
+
+        for (label level = 1; level <= coarsenLevel; ++level)
+        {
+            Info<< "  Coarsening level " << level << "/" << coarsenLevel << "..." << endl;
+
+            // Calculate new dimensions (halved, ceiling for odd counts)
+            // This gives asymmetric grouping at boundaries
+            label newNx = (currNx + 1) / 2;  // ceil(currNx/2)
+            label newNy = (currNy + 1) / 2;
+            label newNz = (currNz + 1) / 2;
+
+            if (newNx < 1) newNx = 1;
+            if (newNy < 1) newNy = 1;
+            if (newNz < 1) newNz = 1;
+
+            Info<< "    " << currNx << "x" << currNy << "x" << currNz
+                << " -> " << newNx << "x" << newNy << "x" << newNz << endl;
+
+            // Build coarse-to-fine cell mapping with volume weights
+            // coarseCelli -> list of (fineCelli, volume)
+            label newNCells = newNx * newNy * newNz;
+            labelListList coarseToFine(newNCells);
+            List<scalarList> coarseToFineVols(newNCells);
+
+            // Fine cell index: fi + currNx*(fj + currNy*fk)
+            // Coarse cell index: ci + newNx*(cj + newNy*ck)
+            // Fine cell (fi,fj,fk) maps to coarse cell (fi/2, fj/2, fk/2)
+
+            for (label fk = 0; fk < currNz; ++fk)
+            {
+                label ck = fk / 2;
+                for (label fj = 0; fj < currNy; ++fj)
+                {
+                    label cj = fj / 2;
+                    for (label fi = 0; fi < currNx; ++fi)
+                    {
+                        label ci = fi / 2;
+
+                        label fineCelli = fi + currNx*(fj + currNy*fk);
+                        label coarseCelli = ci + newNx*(cj + newNy*ck);
+
+                        coarseToFine[coarseCelli].append(fineCelli);
+                        coarseToFineVols[coarseCelli].append(cellVolumes[fineCelli]);
+                    }
+                }
+            }
+
+            // Compute volume-weighted averaged fields
+            // For equal-sized cells, this is just arithmetic mean
+            forAllIters(origScalarFields, iter)
+            {
+                scalarField& field = iter.val();
+
+                scalarField newField(newNCells, Zero);
+
+                forAll(coarseToFine, coarseCelli)
+                {
+                    const labelList& fineCells = coarseToFine[coarseCelli];
+                    const scalarList& vols = coarseToFineVols[coarseCelli];
+
+                    scalar sumVol = 0;
+                    scalar sumVal = 0;
+
+                    forAll(fineCells, i)
+                    {
+                        sumVol += vols[i];
+                        sumVal += vols[i] * field[fineCells[i]];
+                    }
+
+                    newField[coarseCelli] = sumVal / sumVol;
+                }
+
+                field = newField;
+            }
+
+            forAllIters(origVectorFields, iter)
+            {
+                vectorField& field = iter.val();
+
+                vectorField newField(newNCells, Zero);
+
+                forAll(coarseToFine, coarseCelli)
+                {
+                    const labelList& fineCells = coarseToFine[coarseCelli];
+                    const scalarList& vols = coarseToFineVols[coarseCelli];
+
+                    scalar sumVol = 0;
+                    vector sumVal = Zero;
+
+                    forAll(fineCells, i)
+                    {
+                        sumVol += vols[i];
+                        sumVal += vols[i] * field[fineCells[i]];
+                    }
+
+                    newField[coarseCelli] = sumVal / sumVol;
+                }
+
+                field = newField;
+            }
+
+            currNx = newNx;
+            currNy = newNy;
+            currNz = newNz;
+        }
+
+        Info<< nl << "  Creating coarse mesh (" << currNx << "x" << currNy
+            << "x" << currNz << " = " << currNx*currNy*currNz << " cells)..." << endl;
+
+        // Create the coarse mesh directly using polyMesh
+        // Points: (currNx+1) * (currNy+1) * (currNz+1) vertices
+        label nPoints = (currNx+1) * (currNy+1) * (currNz+1);
+        pointField coarsePoints(nPoints);
+
+        scalar dx = span.x() / currNx;
+        scalar dy = span.y() / currNy;
+        scalar dz = span.z() / currNz;
+
+        // Generate points
+        label ptI = 0;
+        for (label k = 0; k <= currNz; ++k)
+        {
+            for (label j = 0; j <= currNy; ++j)
+            {
+                for (label i = 0; i <= currNx; ++i)
+                {
+                    coarsePoints[ptI++] = point
+                    (
+                        bb.min().x() + i*dx,
+                        bb.min().y() + j*dy,
+                        bb.min().z() + k*dz
+                    );
+                }
+            }
+        }
+
+        // Helper lambda to get point index
+        auto ptIndex = [&](label i, label j, label k) -> label
+        {
+            return i + (currNx+1)*(j + (currNy+1)*k);
+        };
+
+        // Create cells (hexahedra)
+        label nCells = currNx * currNy * currNz;
+        cellShapeList cellShapes(nCells);
+
+        const cellModel& hex = cellModel::ref(cellModel::HEX);
+
+        label cellI = 0;
+        for (label k = 0; k < currNz; ++k)
+        {
+            for (label j = 0; j < currNy; ++j)
+            {
+                for (label i = 0; i < currNx; ++i)
+                {
+                    // Hex vertices in OpenFOAM order
+                    labelList hexVerts(8);
+                    hexVerts[0] = ptIndex(i, j, k);
+                    hexVerts[1] = ptIndex(i+1, j, k);
+                    hexVerts[2] = ptIndex(i+1, j+1, k);
+                    hexVerts[3] = ptIndex(i, j+1, k);
+                    hexVerts[4] = ptIndex(i, j, k+1);
+                    hexVerts[5] = ptIndex(i+1, j, k+1);
+                    hexVerts[6] = ptIndex(i+1, j+1, k+1);
+                    hexVerts[7] = ptIndex(i, j+1, k+1);
+
+                    cellShapes[cellI++] = cellShape(hex, hexVerts);
+                }
+            }
+        }
+
+        // Create boundary patches - for spaceTimeWindow subset mesh, there's
+        // typically a single "oldInternalFaces" patch that contains ALL boundary
+        // faces (all 6 sides of the box). Generate all boundary faces for this patch.
+        const polyBoundaryMesh& oldBoundary = fineMesh.boundaryMesh();
+
+        faceListList boundaryFaces(oldBoundary.size());
+        wordList patchNames(oldBoundary.size());
+        wordList patchTypes(oldBoundary.size());
+
+        forAll(oldBoundary, patchI)
+        {
+            patchNames[patchI] = oldBoundary[patchI].name();
+            patchTypes[patchI] = oldBoundary[patchI].type();
+
+            if (oldBoundary[patchI].size() > 0)
+            {
+                DynamicList<face> patchFaces;
+
+                // For "oldInternalFaces" patch (or any patch that wraps the whole
+                // extraction box), generate ALL 6 boundary faces
+                // This is needed because the averaging of face normals would cancel
+                // when opposite faces are included in the same patch
+
+                // xMin faces
+                for (label k = 0; k < currNz; ++k)
+                {
+                    for (label j = 0; j < currNy; ++j)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(0, j, k);
+                        f[1] = ptIndex(0, j, k+1);
+                        f[2] = ptIndex(0, j+1, k+1);
+                        f[3] = ptIndex(0, j+1, k);
+                        patchFaces.append(f);
+                    }
+                }
+
+                // xMax faces
+                for (label k = 0; k < currNz; ++k)
+                {
+                    for (label j = 0; j < currNy; ++j)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(currNx, j, k);
+                        f[1] = ptIndex(currNx, j+1, k);
+                        f[2] = ptIndex(currNx, j+1, k+1);
+                        f[3] = ptIndex(currNx, j, k+1);
+                        patchFaces.append(f);
+                    }
+                }
+
+                // yMin faces
+                for (label k = 0; k < currNz; ++k)
+                {
+                    for (label i = 0; i < currNx; ++i)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(i, 0, k);
+                        f[1] = ptIndex(i+1, 0, k);
+                        f[2] = ptIndex(i+1, 0, k+1);
+                        f[3] = ptIndex(i, 0, k+1);
+                        patchFaces.append(f);
+                    }
+                }
+
+                // yMax faces
+                for (label k = 0; k < currNz; ++k)
+                {
+                    for (label i = 0; i < currNx; ++i)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(i, currNy, k);
+                        f[1] = ptIndex(i, currNy, k+1);
+                        f[2] = ptIndex(i+1, currNy, k+1);
+                        f[3] = ptIndex(i+1, currNy, k);
+                        patchFaces.append(f);
+                    }
+                }
+
+                // zMin faces
+                for (label j = 0; j < currNy; ++j)
+                {
+                    for (label i = 0; i < currNx; ++i)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(i, j, 0);
+                        f[1] = ptIndex(i, j+1, 0);
+                        f[2] = ptIndex(i+1, j+1, 0);
+                        f[3] = ptIndex(i+1, j, 0);
+                        patchFaces.append(f);
+                    }
+                }
+
+                // zMax faces
+                for (label j = 0; j < currNy; ++j)
+                {
+                    for (label i = 0; i < currNx; ++i)
+                    {
+                        face f(4);
+                        f[0] = ptIndex(i, j, currNz);
+                        f[1] = ptIndex(i+1, j, currNz);
+                        f[2] = ptIndex(i+1, j+1, currNz);
+                        f[3] = ptIndex(i, j+1, currNz);
+                        patchFaces.append(f);
+                    }
+                }
+
+                boundaryFaces[patchI] = patchFaces;
+            }
+        }
+
+        // Create empty physical types list (same size as patches)
+        wordList boundaryPatchPhysicalTypes(oldBoundary.size(), word::null);
+
+        // Create the polyMesh
+        polyMesh coarseMesh
+        (
+            IOobject
+            (
+                polyMesh::defaultRegion,
+                extractTime.constant(),
+                extractTime,
+                IOobject::NO_READ,
+                IOobject::AUTO_WRITE
+            ),
+            std::move(coarsePoints),
+            cellShapes,
+            boundaryFaces,
+            patchNames,
+            patchTypes,
+            "defaultFaces",
+            polyPatch::typeName,
+            boundaryPatchPhysicalTypes,
+            false  // syncPar
+        );
+
+        // Write the coarse mesh
+        Info<< "  Writing coarse mesh..." << endl;
+        coarseMesh.write();
+
+        // Now create fvMesh from the written polyMesh to write fields
+        fvMesh coarseFvMesh
+        (
+            IOobject
+            (
+                fvMesh::defaultRegion,
+                extractTime.constant(),
+                extractTime,
+                IOobject::MUST_READ
+            )
+        );
+
+        Info<< nl << "  Writing mapped fields..." << endl;
+
+        // Write scalar fields
+        forAllConstIters(origScalarFields, iter)
+        {
+            const word& fieldName = iter.key();
+            const scalarField& mappedField = iter.val();
+
+            // Read original field to get BC structure and dimensions
+            fileName origFieldPath = extractDir / initialTimeDir / fieldName;
+            IFstream ifs(origFieldPath);
+            dictionary origFieldDict(ifs);
+
+            // Determine dimensions based on field name (common CFD fields)
+            // Use helper lambda to create properly dimensioned field
+            auto createScalarField = [&](const dimensionSet& dims) -> volScalarField
+            {
+                return volScalarField
+                (
+                    IOobject
+                    (
+                        fieldName,
+                        extractTime.timeName(),
+                        coarseFvMesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    coarseFvMesh,
+                    dimensionedScalar(fieldName, dims, Zero)
+                );
+            };
+
+            // Create field with appropriate dimensions
+            autoPtr<volScalarField> sfPtr;
+            if (fieldName == "nut" || fieldName == "nuTilda" || fieldName == "nuEff")
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimensionSet(0, 2, -1, 0, 0, 0, 0))));
+            }
+            else if (fieldName == "p" || fieldName == "p_rgh")
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimensionSet(0, 2, -2, 0, 0, 0, 0))));
+            }
+            else if (fieldName == "k")
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimensionSet(0, 2, -2, 0, 0, 0, 0))));
+            }
+            else if (fieldName == "epsilon")
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimensionSet(0, 2, -3, 0, 0, 0, 0))));
+            }
+            else if (fieldName == "omega")
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimensionSet(0, 0, -1, 0, 0, 0, 0))));
+            }
+            else
+            {
+                sfPtr.reset(new volScalarField(createScalarField(dimless)));
+            }
+
+            volScalarField& sf = sfPtr();
+
+            // Set internal field
+            sf.primitiveFieldRef() = mappedField;
+
+            // Write field manually to preserve original BC structure
+            fileName fieldPath = extractDir / initialTimeDir / fieldName;
+            OFstream os(fieldPath);
+
+            os  << "/*--------------------------------*- C++ -*----------------------------------*\\" << nl
+                << "| =========                 |                                                 |" << nl
+                << "| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |" << nl
+                << "|  \\\\    /   O peration     | Version:  " << word(Foam::foamVersion::version) << "                                  |" << nl
+                << "|   \\\\  /    A nd           | Website:  www.openfoam.com                      |" << nl
+                << "|    \\\\/     M anipulation  |                                                 |" << nl
+                << "\\*---------------------------------------------------------------------------*/" << nl
+                << "FoamFile" << nl
+                << "{" << nl
+                << "    version     2.0;" << nl
+                << "    format      ascii;" << nl
+                << "    arch        \"LSB;label=32;scalar=64\";" << nl
+                << "    class       volScalarField;" << nl
+                << "    location    \"" << initialTimeDir << "\";" << nl
+                << "    object      " << fieldName << ";" << nl
+                << "}" << nl
+                << "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //" << nl
+                << nl
+                << "dimensions      " << sf.dimensions() << ";" << nl
+                << nl
+                << "internalField   nonuniform List<scalar>" << nl
+                << mappedField.size() << nl
+                << "(" << nl;
+
+            forAll(mappedField, i)
+            {
+                os << mappedField[i] << nl;
+            }
+            os  << ")" << nl
+                << ";" << nl
+                << nl
+                << "boundaryField" << nl
+                << "{" << nl;
+
+            // Copy BC from original field
+            const dictionary& bfDict = origFieldDict.subDict("boundaryField");
+            forAll(sf.boundaryField(), patchI)
+            {
+                const word& patchName = coarseFvMesh.boundary()[patchI].name();
+                os << "    " << patchName << nl << "    {" << nl;
+                if (bfDict.found(patchName))
+                {
+                    const dictionary& patchDict = bfDict.subDict(patchName);
+                    for (const entry& e : patchDict)
+                    {
+                        os << "        " << e << nl;
+                    }
+                }
+                else
+                {
+                    os << "        type            zeroGradient;" << nl;
+                }
+                os << "    }" << nl;
+            }
+            os << "}" << nl << nl
+               << "// ************************************************************************* //" << nl;
+
+            Info<< "    Mapped: " << fieldName << " (scalar, "
+                << originalNCells << " -> " << mappedField.size() << " cells)" << endl;
+        }
+
+        // Write vector fields
+        forAllConstIters(origVectorFields, iter)
+        {
+            const word& fieldName = iter.key();
+            const vectorField& mappedField = iter.val();
+
+            // Read original field to get dimensions
+            fileName origFieldPath = extractDir / initialTimeDir / fieldName;
+            IFstream ifs(origFieldPath);
+            dictionary origFieldDict(ifs);
+
+            // Use helper lambda to create properly dimensioned vector field
+            auto createVectorField = [&](const dimensionSet& dims) -> volVectorField
+            {
+                return volVectorField
+                (
+                    IOobject
+                    (
+                        fieldName,
+                        extractTime.timeName(),
+                        coarseFvMesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    coarseFvMesh,
+                    dimensionedVector(fieldName, dims, Zero)
+                );
+            };
+
+            // Create field with appropriate dimensions (velocity m/s for U)
+            autoPtr<volVectorField> vfPtr;
+            if (fieldName == "U" || fieldName == "U_0")
+            {
+                vfPtr.reset(new volVectorField(createVectorField(dimensionSet(0, 1, -1, 0, 0, 0, 0))));
+            }
+            else
+            {
+                vfPtr.reset(new volVectorField(createVectorField(dimless)));
+            }
+
+            volVectorField& vf = vfPtr();
+            vf.primitiveFieldRef() = mappedField;
+
+            // Write field manually to preserve original BC structure
+            fileName fieldPath = extractDir / initialTimeDir / fieldName;
+            OFstream os(fieldPath);
+
+            os  << "/*--------------------------------*- C++ -*----------------------------------*\\" << nl
+                << "| =========                 |                                                 |" << nl
+                << "| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |" << nl
+                << "|  \\\\    /   O peration     | Version:  " << word(Foam::foamVersion::version) << "                                  |" << nl
+                << "|   \\\\  /    A nd           | Website:  www.openfoam.com                      |" << nl
+                << "|    \\\\/     M anipulation  |                                                 |" << nl
+                << "\\*---------------------------------------------------------------------------*/" << nl
+                << "FoamFile" << nl
+                << "{" << nl
+                << "    version     2.0;" << nl
+                << "    format      ascii;" << nl
+                << "    arch        \"LSB;label=32;scalar=64\";" << nl
+                << "    class       volVectorField;" << nl
+                << "    location    \"" << initialTimeDir << "\";" << nl
+                << "    object      " << fieldName << ";" << nl
+                << "}" << nl
+                << "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //" << nl
+                << nl
+                << "dimensions      " << vf.dimensions() << ";" << nl
+                << nl
+                << "internalField   nonuniform List<vector>" << nl
+                << mappedField.size() << nl
+                << "(" << nl;
+
+            forAll(mappedField, i)
+            {
+                os << mappedField[i] << nl;
+            }
+            os  << ")" << nl
+                << ";" << nl
+                << nl
+                << "boundaryField" << nl
+                << "{" << nl;
+
+            // Copy BC from original field
+            const dictionary& bfDict = origFieldDict.subDict("boundaryField");
+            forAll(vf.boundaryField(), patchI)
+            {
+                const word& patchName = coarseFvMesh.boundary()[patchI].name();
+                os << "    " << patchName << nl << "    {" << nl;
+                if (bfDict.found(patchName))
+                {
+                    const dictionary& patchDict = bfDict.subDict(patchName);
+                    for (const entry& e : patchDict)
+                    {
+                        os << "        " << e << nl;
+                    }
+                }
+                else
+                {
+                    os << "        type            zeroGradient;" << nl;
+                }
+                os << "    }" << nl;
+            }
+            os << "}" << nl << nl
+               << "// ************************************************************************* //" << nl;
+
+            Info<< "    Mapped: " << fieldName << " (vector, "
+                << originalNCells << " -> " << mappedField.size() << " cells)" << endl;
+        }
+
+        Info<< nl << "  Mesh coarsening complete." << nl
+            << "  Final mesh: " << coarseFvMesh.nCells() << " cells, "
+            << coarseFvMesh.nFaces() << " faces" << nl
+            << "  Fields mapped using volume-weighted averaging (conservative)." << nl
+            << "  The spaceTimeWindow BC will interpolate boundaryData" << nl
+            << "  to the coarser mesh faces using area-weighted averaging." << nl << endl;
+    }
 
     Info<< nl
         << "========================================" << nl

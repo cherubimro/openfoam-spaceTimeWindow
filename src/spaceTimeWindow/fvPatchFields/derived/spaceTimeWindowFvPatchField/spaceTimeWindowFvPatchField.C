@@ -21,6 +21,7 @@ License
 #include "deltaVarintCodec.H"
 #include "pTraits.H"
 #include "volFields.H"
+#include "primitivePatchInterpolation.H"
 #include <type_traits>
 
 // * * * * * * * * * * * * * Private Member Functions  * * * * * * * * * * * //
@@ -109,16 +110,27 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
                 << exit(FatalError);
         }
 
-        // Verify size matches patch
+        // Check if spatial interpolation is needed
         if (data.size() != this->patch().size())
         {
-            FatalErrorInFunction
-                << "Field size " << data.size()
-                << " does not match patch size " << this->patch().size() << nl
-                << "    File: " << dvzPath << nl
-                << "    Patch: " << this->patch().name() << nl
-                << "    This BC requires pre-computed face values with NO spatial mapping" << nl
-                << exit(FatalError);
+            // Initialize spatial interpolation if not done
+            initSpatialInterpolation();
+
+            if (spatialInterpPtr_.valid() && spatialInterpPtr_->needsInterpolation())
+            {
+                // Apply spatial interpolation
+                return spatialInterpPtr_->interpolate(data)();
+            }
+            else
+            {
+                FatalErrorInFunction
+                    << "Field size " << data.size()
+                    << " does not match patch size " << this->patch().size() << nl
+                    << "    File: " << dvzPath << nl
+                    << "    Patch: " << this->patch().name() << nl
+                    << "    Spatial interpolation not available (missing points file?)" << nl
+                    << exit(FatalError);
+            }
         }
 
         return data;
@@ -164,16 +176,27 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
         // Read field data (format now determined by header)
         Field<Type> data(is);
 
-        // Verify size matches patch
+        // Check if spatial interpolation is needed
         if (data.size() != this->patch().size())
         {
-            FatalErrorInFunction
-                << "Field size " << data.size()
-                << " does not match patch size " << this->patch().size() << nl
-                << "    File: " << dataPath << nl
-                << "    Patch: " << this->patch().name() << nl
-                << "    This BC requires pre-computed face values with NO spatial mapping" << nl
-                << exit(FatalError);
+            // Initialize spatial interpolation if not done
+            initSpatialInterpolation();
+
+            if (spatialInterpPtr_.valid() && spatialInterpPtr_->needsInterpolation())
+            {
+                // Apply spatial interpolation
+                return spatialInterpPtr_->interpolate(data)();
+            }
+            else
+            {
+                FatalErrorInFunction
+                    << "Field size " << data.size()
+                    << " does not match patch size " << this->patch().size() << nl
+                    << "    File: " << dataPath << nl
+                    << "    Patch: " << this->patch().name() << nl
+                    << "    Spatial interpolation not available (missing points file?)" << nl
+                    << exit(FatalError);
+            }
         }
 
         return data;
@@ -183,16 +206,27 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
     is.putBack(firstToken);
     Field<Type> data(is);
 
-    // Verify size matches patch
+    // Check if spatial interpolation is needed
     if (data.size() != this->patch().size())
     {
-        FatalErrorInFunction
-            << "Field size " << data.size()
-            << " does not match patch size " << this->patch().size() << nl
-            << "    File: " << dataPath << nl
-            << "    Patch: " << this->patch().name() << nl
-            << "    This BC requires pre-computed face values with NO spatial mapping" << nl
-            << exit(FatalError);
+        // Initialize spatial interpolation if not done
+        initSpatialInterpolation();
+
+        if (spatialInterpPtr_.valid() && spatialInterpPtr_->needsInterpolation())
+        {
+            // Apply spatial interpolation
+            return spatialInterpPtr_->interpolate(data)();
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Field size " << data.size()
+                << " does not match patch size " << this->patch().size() << nl
+                << "    File: " << dataPath << nl
+                << "    Patch: " << this->patch().name() << nl
+                << "    Spatial interpolation not available (missing points file?)" << nl
+                << exit(FatalError);
+        }
     }
 
     return data;
@@ -433,6 +467,123 @@ void Foam::spaceTimeWindowFvPatchField<Type>::validateMetadata() const
 
 
 template<class Type>
+void Foam::spaceTimeWindowFvPatchField<Type>::initSpatialInterpolation() const
+{
+    if (spatialInterpInitialized_)
+    {
+        return;
+    }
+
+    spatialInterpInitialized_ = true;
+
+    // Read source points from boundaryData/<patchName>/points
+    const fileName pointsPath
+    (
+        this->db().time().globalPath()
+      / dataDir_
+      / this->patch().name()
+      / "points"
+    );
+
+    if (!isFile(pointsPath))
+    {
+        // No points file - assume same resolution, no spatial interpolation needed
+        DebugInfo
+            << "No points file found at " << pointsPath << nl
+            << "    Assuming same resolution - no spatial interpolation" << endl;
+        return;
+    }
+
+    // Read source points
+    IFstream is(pointsPath);
+    if (!is.good())
+    {
+        WarningInFunction
+            << "Cannot read points file " << pointsPath << nl
+            << "    Assuming same resolution - no spatial interpolation" << endl;
+        return;
+    }
+
+    vectorField srcPoints(is);
+
+    // Get target points (current patch face centers)
+    const vectorField tgtPoints(this->patch().Cf());
+
+    // Check if interpolation is needed
+    if (srcPoints.size() == tgtPoints.size())
+    {
+        // Same number of points - check if they're identical
+        bool identical = true;
+        const scalar tol = 1e-10;
+
+        forAll(srcPoints, i)
+        {
+            if (mag(srcPoints[i] - tgtPoints[i]) > tol)
+            {
+                identical = false;
+                break;
+            }
+        }
+
+        if (identical)
+        {
+            DebugInfo
+                << "Source and target points are identical - no spatial interpolation" << endl;
+            return;
+        }
+    }
+
+    // Need interpolation - read bounding box from metadata
+    const fileName metadataPath
+    (
+        this->db().time().globalPath()
+      / dataDir_
+      / this->patch().name()
+      / "extractionMetadata"
+    );
+
+    if (isFile(metadataPath))
+    {
+        IFstream metaIs(metadataPath);
+        if (metaIs.good())
+        {
+            dictionary metadata(metaIs);
+            if (metadata.found("boundingBox"))
+            {
+                boundingBox_ = metadata.get<boundBox>("boundingBox");
+            }
+        }
+    }
+
+    // If no bounding box from metadata, compute from source points
+    if (boundingBox_.empty())
+    {
+        boundingBox_ = boundBox(srcPoints);
+        boundingBox_.grow(1e-4 * boundingBox_.mag());
+    }
+
+    // Create spatial interpolation
+    spatialInterpPtr_.reset
+    (
+        new spatialInterpolation2D(srcPoints, tgtPoints, boundingBox_)
+    );
+
+    // Report interpolation mode
+    if (spatialInterpPtr_->needsInterpolation())
+    {
+        Info<< "spaceTimeWindow BC on patch " << this->patch().name()
+            << ": spatial interpolation initialized" << nl
+            << "    Source points: " << srcPoints.size() << nl
+            << "    Target points: " << tgtPoints.size() << nl
+            << "    Mode: "
+            << (spatialInterpPtr_->isRefinement() ? "BARYCENTRIC (refinement)"
+                                                   : "AREA_WEIGHTED (coarsening)")
+            << endl;
+    }
+}
+
+
+template<class Type>
 Type Foam::spaceTimeWindowFvPatchField<Type>::catmullRomCentripetal
 (
     const Type& p0,
@@ -522,7 +673,10 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     sampledValues1_(),
     sampledValues2_(),
     sampledValues3_(),
-    metadataValidated_(false)
+    metadataValidated_(false),
+    spatialInterpPtr_(nullptr),
+    boundingBox_(),
+    spatialInterpInitialized_(false)
 {}
 
 
@@ -552,7 +706,10 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     sampledValues1_(),
     sampledValues2_(),
     sampledValues3_(),
-    metadataValidated_(false)
+    metadataValidated_(false),
+    spatialInterpPtr_(nullptr),
+    boundingBox_(),
+    spatialInterpInitialized_(false)
 {
     // Parse time interpolation scheme
     const word schemeStr = dict.getOrDefault<word>("timeInterpolationScheme", "linear");
@@ -601,7 +758,10 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     sampledValues1_(),
     sampledValues2_(),
     sampledValues3_(),
-    metadataValidated_(ptf.metadataValidated_)
+    metadataValidated_(ptf.metadataValidated_),
+    spatialInterpPtr_(nullptr),
+    boundingBox_(),
+    spatialInterpInitialized_(false)
 {}
 
 
@@ -629,7 +789,10 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     sampledValues1_(ptf.sampledValues1_),
     sampledValues2_(ptf.sampledValues2_),
     sampledValues3_(ptf.sampledValues3_),
-    metadataValidated_(ptf.metadataValidated_)
+    metadataValidated_(ptf.metadataValidated_),
+    spatialInterpPtr_(nullptr),
+    boundingBox_(ptf.boundingBox_),
+    spatialInterpInitialized_(false)
 {}
 
 
@@ -658,7 +821,10 @@ Foam::spaceTimeWindowFvPatchField<Type>::spaceTimeWindowFvPatchField
     sampledValues1_(ptf.sampledValues1_),
     sampledValues2_(ptf.sampledValues2_),
     sampledValues3_(ptf.sampledValues3_),
-    metadataValidated_(ptf.metadataValidated_)
+    metadataValidated_(ptf.metadataValidated_),
+    spatialInterpPtr_(nullptr),
+    boundingBox_(ptf.boundingBox_),
+    spatialInterpInitialized_(false)
 {}
 
 

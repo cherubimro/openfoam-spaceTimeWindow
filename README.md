@@ -601,12 +601,6 @@ cd examples/ufr2-02
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`
 
-## Acknowledgments
-
-The example case mesh generation is based on the work of **Niklas Nordin**, as documented in the [OpenFOAM Wiki UFR2-02 Benchmark](https://openfoamwiki.net/index.php?title=Benchmark_ercoftac_ufr2-02). The test case uses data from the **ERCOFTAC Classic Collection Database** (Case 043), available at http://cfd.mace.manchester.ac.uk/ercoftac/.
-
-This library was developed at Politehnica University of Timisoara.
-
 ## References
 
 **Acknowledging this work**

@@ -712,9 +712,10 @@ void Foam::functionObjects::spaceTimeWindowExtract::gatherAndWriteInitialFields(
     UPstream::barrier(UPstream::worldComm);
 
     Info<< type() << " " << name() << ": Writing initial fields to "
-        << timeDir << " (gathered from " << Pstream::nProcs() << " processors)" << endl;
+        << timeDir << " (gathered from " << Pstream::nProcs() << " processors)" << nl
+        << "    Initial fields: " << initialFieldNames_ << endl;
 
-    for (const word& fieldName : fieldNames_)
+    for (const word& fieldName : initialFieldNames_)
     {
         // Try scalar field
         const auto* sfPtr = mesh_.findObject<volScalarField>(fieldName);
@@ -1131,9 +1132,10 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
     mkDir(timeDir);
 
     Info<< type() << " " << name() << ": Writing initial fields at t_2 ("
-        << timeName << ") for cubic-safe reconstruction start" << endl;
+        << timeName << ") for cubic-safe reconstruction start" << nl
+        << "    Initial fields: " << initialFieldNames_ << endl;
 
-    for (const word& fieldName : fieldNames_)
+    for (const word& fieldName : initialFieldNames_)
     {
         // Try scalar field
         const auto* sfPtr = mesh_.findObject<volScalarField>(fieldName);
@@ -1613,6 +1615,7 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     boxMax_(Zero),
     outputDir_(),
     fieldNames_(),
+    initialFieldNames_(),
     writeFormat_(IOstreamOption::ASCII),
     writeCompression_(IOstreamOption::UNCOMPRESSED),
     useDeltaVarint_(false),
@@ -1712,6 +1715,12 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     dict.readEntry("outputDir", outputDir_);
     dict.readEntry("fields", fieldNames_);
 
+    // Read optional initialFields (defaults to fields if not specified)
+    if (!dict.readIfPresent("initialFields", initialFieldNames_))
+    {
+        initialFieldNames_ = fieldNames_;
+    }
+
     // Read write format (ascii, binary, or deltaVarint), default to ascii
     const word writeFormatStr = dict.getOrDefault<word>("writeFormat", "ascii");
     if (writeFormatStr == "binary")
@@ -1771,7 +1780,8 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     Info<< type() << " " << name() << ":" << nl
         << "    box:       " << boxMin_ << " " << boxMax_ << nl
         << "    outputDir: " << outputDir_ << nl
-        << "    fields:    " << fieldNames_ << nl
+        << "    fields (boundaryData): " << fieldNames_ << nl
+        << "    initialFields:         " << initialFieldNames_ << nl
         << "    writeFormat: " << writeFormatStr;
 
     if (useDeltaVarint_)

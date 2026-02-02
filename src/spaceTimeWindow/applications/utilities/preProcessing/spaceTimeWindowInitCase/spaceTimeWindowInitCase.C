@@ -780,6 +780,21 @@ int main(int argc, char *argv[])
         "Apply least-squares mass flux correction to boundaryData velocity"
     );
 
+    argList::addBoolOption
+    (
+        "inletOutletBC",
+        "Use spaceTimeWindowInletOutlet BC for U (flux-based Dirichlet/zeroGradient) "
+        "and zeroGradient for all scalar fields (p, turbulence). Recommended for vortex shedding flows."
+    );
+
+    argList::addOption
+    (
+        "initialFields",
+        "wordList",
+        "Fields to extract for initial conditions (e.g., \"(U p nut)\"). "
+        "Default: same as fields in boundaryData"
+    );
+
     argList::noParallel();
     argList::noFunctionObjects();
 
@@ -813,6 +828,44 @@ int main(int argc, char *argv[])
     // Mass flux correction option
     bool correctMassFlux = args.found("correctMassFlux");
 
+    // Inlet-outlet BC option: U uses spaceTimeWindowInletOutlet, p/nut use zeroGradient
+    bool useInletOutletBC = args.found("inletOutletBC");
+
+    // Validate incompatible options: -inletOutletBC is incompatible with -outletDirection/-outletFraction
+    // The inlet-outlet BC approach uses flux-based switching on oldInternalFaces
+    // (Dirichlet at inflow, zeroGradient at outflow), so a separate outlet patch is unnecessary
+    // and would create conflicting boundary conditions
+    if (useInletOutletBC && createOutlet)
+    {
+        FatalErrorInFunction
+            << "Options -inletOutletBC and -outletDirection are incompatible." << nl
+            << nl
+            << "  -inletOutletBC: Uses spaceTimeWindowInletOutlet BC which automatically" << nl
+            << "                  applies Dirichlet at inflow faces and zeroGradient at" << nl
+            << "                  outflow faces based on the flux direction." << nl
+            << nl
+            << "  -outletDirection: Creates a separate outlet patch for pressure relief" << nl
+            << "                    and applies Dirichlet on all remaining faces." << nl
+            << nl
+            << "Choose one approach:" << nl
+            << "  1. For vortex shedding/unsteady flows: use -inletOutletBC (recommended)" << nl
+            << "     This allows natural outflow without a fixed outlet region." << nl
+            << nl
+            << "  2. For flows with known outlet direction: use -outletDirection" << nl
+            << "     This creates a fixed outlet patch for pressure relief." << nl
+            << exit(FatalError);
+    }
+
+    // User-specified initial fields (if not specified, default to fields in boundaryData)
+    wordList userInitialFields;
+    bool hasUserInitialFields = false;
+    if (args.found("initialFields"))
+    {
+        IStringStream is(args["initialFields"]);
+        is >> userInitialFields;
+        hasUserInitialFields = true;
+    }
+
     Info<< "spaceTimeWindowInitCase" << nl
         << "    Source case:    " << sourceCase << nl
         << "    Extract dir:    " << extractDir << nl;
@@ -825,6 +878,16 @@ int main(int argc, char *argv[])
     if (correctMassFlux)
     {
         Info<< "    Mass flux correction: enabled" << nl;
+    }
+    if (useInletOutletBC)
+    {
+        Info<< "    Inlet-outlet BC mode: enabled" << nl
+            << "        U: spaceTimeWindowInletOutlet (flux-based Dirichlet/zeroGradient)" << nl
+            << "        All scalar fields (p, nut, k, epsilon, omega, etc.): zeroGradient" << nl;
+    }
+    if (hasUserInitialFields)
+    {
+        Info<< "    Initial fields: " << userInitialFields << nl;
     }
     Info<< endl;
 
@@ -1659,7 +1722,12 @@ int main(int argc, char *argv[])
                 << "}" << nl << nl;
         };
 
-        // Get field names from boundaryData first time directory
+        // Get field names for initial condition extraction
+        // Use user-specified fields if provided, otherwise fall back to boundaryData fields
+        wordList fieldsToExtract;
+        wordList boundaryDataFields;
+
+        // First, get the fields that are actually in boundaryData
         fileNameList firstTimeFiles;
         for (const fileName& dir : timeDirs)
         {
@@ -1671,7 +1739,6 @@ int main(int argc, char *argv[])
             }
         }
 
-        wordList fieldsToExtract;
         for (const fileName& f : firstTimeFiles)
         {
             if (f != "points" && f != "extractionMetadata")
@@ -1683,8 +1750,21 @@ int main(int argc, char *argv[])
                 {
                     fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
                 }
-                fieldsToExtract.append(fieldName);
+                boundaryDataFields.append(fieldName);
             }
+        }
+
+        // Decide which fields to extract for initial conditions
+        if (hasUserInitialFields)
+        {
+            fieldsToExtract = userInitialFields;
+            Info<< "    Using user-specified initial fields: " << fieldsToExtract << nl
+                << "    BoundaryData fields (for BC): " << boundaryDataFields << endl;
+        }
+        else
+        {
+            fieldsToExtract = boundaryDataFields;
+            Info<< "    Using boundaryData fields for initial conditions: " << fieldsToExtract << endl;
         }
 
         // Read face reordering info if it exists (created when outlet patch is made)
@@ -1773,14 +1853,41 @@ int main(int argc, char *argv[])
                     }
                     os << ')' << ';' << nl << nl;
 
+                    // Check if field is in boundaryData (has time-varying BC data)
+                    bool fieldInBoundaryData = boundaryDataFields.found(fieldName);
+
                     os << "boundaryField" << nl << '{' << nl;
                     os << "    oldInternalFaces" << nl
-                       << "    {" << nl
-                       << "        type            spaceTimeWindow;" << nl
-                       << "        dataDir         \"constant/boundaryData\";" << nl
-                       << "        fixesValue      true;" << nl
-                       << "        value           uniform (0 0 0);" << nl
-                       << "    }" << nl;
+                       << "    {" << nl;
+
+                    if (fieldInBoundaryData)
+                    {
+                        // Field is in boundaryData - use spaceTimeWindow BC
+                        if (useInletOutletBC)
+                        {
+                            os << "        type            spaceTimeWindowInletOutlet;" << nl
+                               << "        dataDir         \"constant/boundaryData\";" << nl
+                               << "        phi             phi;" << nl
+                               << "        allowTimeInterpolation  true;" << nl
+                               << "        timeInterpolationScheme cubic;" << nl
+                               << "        value           uniform (0 0 0);" << nl;
+                        }
+                        else
+                        {
+                            os << "        type            spaceTimeWindow;" << nl
+                               << "        dataDir         \"constant/boundaryData\";" << nl
+                               << "        fixesValue      true;" << nl
+                               << "        value           uniform (0 0 0);" << nl;
+                        }
+                    }
+                    else
+                    {
+                        // Field NOT in boundaryData - use zeroGradient (no time-varying data)
+                        os << "        type            zeroGradient;" << nl;
+                        Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                    }
+
+                    os << "    }" << nl;
                     os << "    outlet" << nl
                        << "    {" << nl
                        << "        type            inletOutlet;" << nl
@@ -1832,14 +1939,32 @@ int main(int argc, char *argv[])
                     }
                     os << ')' << ';' << nl << nl;
 
+                    // Check if field is in boundaryData (has time-varying BC data)
+                    bool fieldInBoundaryData = boundaryDataFields.found(fieldName);
+
                     os << "boundaryField" << nl << '{' << nl;
                     os << "    oldInternalFaces" << nl
-                       << "    {" << nl
-                       << "        type            spaceTimeWindow;" << nl
-                       << "        dataDir         \"constant/boundaryData\";" << nl
-                       << "        fixesValue      true;" << nl
-                       << "        value           uniform 0;" << nl
-                       << "    }" << nl;
+                       << "    {" << nl;
+
+                    if (fieldInBoundaryData && !useInletOutletBC)
+                    {
+                        // Field is in boundaryData and not using inletOutletBC - use spaceTimeWindow
+                        os << "        type            spaceTimeWindow;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        fixesValue      true;" << nl
+                           << "        value           uniform 0;" << nl;
+                    }
+                    else
+                    {
+                        // Field NOT in boundaryData, or using inletOutletBC - use zeroGradient
+                        os << "        type            zeroGradient;" << nl;
+                        if (!fieldInBoundaryData)
+                        {
+                            Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                        }
+                    }
+
+                    os << "    }" << nl;
                     os << "    outlet" << nl
                        << "    {" << nl
                        << "        type            zeroGradient;" << nl
@@ -1854,6 +1979,7 @@ int main(int argc, char *argv[])
         else
         {
             // No outlet - use cellMap() for direct cell value extraction (no interpolation)
+            // The subset mesh has only oldInternalFaces patch
             Info<< "    Extracting fields with cellMap (no outlet)..." << endl;
 
             const labelList& cellMap = meshSubset.cellMap();
@@ -1863,6 +1989,9 @@ int main(int argc, char *argv[])
                 Info<< "    Processing field: " << fieldName << endl;
 
                 bool isVector = (fieldName == "U" || fieldName == "U_0");
+
+                // Check if field is in boundaryData (has time-varying BC data)
+                bool fieldInBoundaryData = boundaryDataFields.found(fieldName);
 
                 if (!isVector)
                 {
@@ -1904,19 +2033,31 @@ int main(int argc, char *argv[])
                     }
                     os << ')' << ';' << nl << nl;
 
+                    // Write boundary field - only oldInternalFaces exists in subset mesh
                     os << "boundaryField" << nl << '{' << nl;
-                    forAll(subMesh.boundary(), patchi)
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl;
+
+                    if (fieldInBoundaryData && !useInletOutletBC)
                     {
-                        const fvPatch& patch = subMesh.boundary()[patchi];
-                        os << "    " << patch.name() << nl
-                           << "    {" << nl
-                           << "        type            spaceTimeWindow;" << nl
+                        // Field is in boundaryData and not using inletOutletBC - use spaceTimeWindow
+                        os << "        type            spaceTimeWindow;" << nl
                            << "        dataDir         \"constant/boundaryData\";" << nl
                            << "        fixesValue      true;" << nl
-                           << "        value           uniform 0;" << nl
-                           << "    }" << nl;
+                           << "        value           uniform 0;" << nl;
                     }
+                    else
+                    {
+                        // Field NOT in boundaryData, or using inletOutletBC - use zeroGradient
+                        os << "        type            zeroGradient;" << nl;
+                    }
+                    os << "    }" << nl;
                     os << '}' << nl;
+
+                    if (!fieldInBoundaryData)
+                    {
+                        Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                    }
 
                     Info<< "    Extracted: " << fieldName << " (scalar, "
                         << subInternal.size() << " cells)" << endl;
@@ -1961,18 +2102,40 @@ int main(int argc, char *argv[])
                     }
                     os << ')' << ';' << nl << nl;
 
+                    // Write boundary field - only oldInternalFaces exists in subset mesh
                     os << "boundaryField" << nl << '{' << nl;
-                    forAll(subMesh.boundary(), patchi)
+                    os << "    oldInternalFaces" << nl
+                       << "    {" << nl;
+
+                    if (fieldInBoundaryData)
                     {
-                        const fvPatch& patch = subMesh.boundary()[patchi];
-                        os << "    " << patch.name() << nl
-                           << "    {" << nl
-                           << "        type            spaceTimeWindow;" << nl
-                           << "        dataDir         \"constant/boundaryData\";" << nl
-                           << "        fixesValue      true;" << nl
-                           << "        value           uniform (0 0 0);" << nl
-                           << "    }" << nl;
+                        // Field is in boundaryData - use spaceTimeWindow BC
+                        if (useInletOutletBC)
+                        {
+                            // With -inletOutletBC: U uses spaceTimeWindowInletOutlet
+                            os << "        type            spaceTimeWindowInletOutlet;" << nl
+                               << "        dataDir         \"constant/boundaryData\";" << nl
+                               << "        phi             phi;" << nl
+                               << "        allowTimeInterpolation  true;" << nl
+                               << "        timeInterpolationScheme cubic;" << nl
+                               << "        value           uniform (0 0 0);" << nl;
+                        }
+                        else
+                        {
+                            // Default: all fields use spaceTimeWindow
+                            os << "        type            spaceTimeWindow;" << nl
+                               << "        dataDir         \"constant/boundaryData\";" << nl
+                               << "        fixesValue      true;" << nl
+                               << "        value           uniform (0 0 0);" << nl;
+                        }
                     }
+                    else
+                    {
+                        // Field NOT in boundaryData - use zeroGradient (no time-varying data)
+                        os << "        type            zeroGradient;" << nl;
+                        Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                    }
+                    os << "    }" << nl;
                     os << '}' << nl;
 
                     Info<< "    Extracted: " << fieldName << " (vector, "
@@ -2050,7 +2213,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 5. Find extracted fields from boundaryData
+    // 5. Find fields in boundaryData (for BC assignment)
     fileNameList firstTimeFiles;
     for (const fileName& dir : timeDirs)
     {
@@ -2062,7 +2225,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    wordList extractedFields;
+    wordList boundaryDataFields;
     for (const fileName& f : firstTimeFiles)
     {
         if (f != "points" && f != "extractionMetadata")
@@ -2074,11 +2237,11 @@ int main(int argc, char *argv[])
             {
                 fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
             }
-            extractedFields.append(fieldName);
+            boundaryDataFields.append(fieldName);
         }
     }
 
-    Info<< nl << "Extracted fields: " << extractedFields << endl;
+    Info<< nl << "BoundaryData fields (for BC): " << boundaryDataFields << endl;
 
     // 6. Update initial fields with spaceTimeWindow BC
     // The spaceTimeWindowExtract already wrote subset fields to extractDir
@@ -2109,10 +2272,28 @@ int main(int argc, char *argv[])
 
     Info<< "    Using initial time: " << initialTimeDir << endl;
 
-    // Update each extracted field - modify oldInternalFaces BC to spaceTimeWindow
-    // The extraction wrote fields with "calculated" BC on oldInternalFaces
-    // We need to replace it with "spaceTimeWindow" BC
-    for (const word& fieldName : extractedFields)
+    // Discover initial fields from the time directory
+    // (these may differ from boundaryDataFields if initialFields was configured separately)
+    wordList initialFields;
+    fileNameList initFieldFiles = readDir(extractDir / initialTimeDir, fileName::FILE);
+    for (const fileName& f : initFieldFiles)
+    {
+        // Only include files that look like OpenFOAM field files
+        // Skip compressed files, backup files, etc.
+        if (!f.ends_with("~") && !f.ends_with(".gz") && f != "uniform")
+        {
+            initialFields.append(f);
+        }
+    }
+
+    Info<< "    Initial fields in " << initialTimeDir << "/: " << initialFields << endl;
+
+    // Update each extracted field - rewrite with only oldInternalFaces in boundaryField
+    // Serial extraction writes fields with all source mesh patches, but the subset mesh
+    // only has oldInternalFaces. We need to rewrite the entire boundaryField section.
+    // - Fields in boundaryDataFields: use spaceTimeWindow or spaceTimeWindowInletOutlet BC
+    // - Fields NOT in boundaryDataFields: use zeroGradient BC
+    for (const word& fieldName : initialFields)
     {
         fileName fieldPath = extractDir / initialTimeDir / fieldName;
 
@@ -2138,100 +2319,104 @@ int main(int argc, char *argv[])
             fieldType = "vector";
         }
 
-        // Find and replace the oldInternalFaces BC
-        // Pattern to find: oldInternalFaces { type calculated; ... }
-        std::string searchStart = "oldInternalFaces";
-        std::size_t pos = content.find(searchStart);
+        // Check if field has time-varying BC data in boundaryData
+        bool fieldInBoundaryData = boundaryDataFields.found(fieldName);
 
-        if (pos != std::string::npos)
+        // Find boundaryField section and replace the entire section
+        // to only include oldInternalFaces (remove walls, inlet, outlet, etc.)
+        std::string searchBoundary = "boundaryField";
+        std::size_t boundaryPos = content.find(searchBoundary);
+
+        if (boundaryPos != std::string::npos)
         {
-            // Find the opening brace
-            std::size_t braceStart = content.find('{', pos);
-            if (braceStart != std::string::npos)
+            // Find the opening brace of boundaryField
+            std::size_t bfBraceStart = content.find('{', boundaryPos);
+            if (bfBraceStart != std::string::npos)
             {
-                // Find the matching closing brace
+                // Find the matching closing brace of boundaryField
                 int braceCount = 1;
-                std::size_t braceEnd = braceStart + 1;
-                while (braceEnd < content.size() && braceCount > 0)
+                std::size_t bfBraceEnd = bfBraceStart + 1;
+                while (bfBraceEnd < content.size() && braceCount > 0)
                 {
-                    if (content[braceEnd] == '{') braceCount++;
-                    else if (content[braceEnd] == '}') braceCount--;
-                    braceEnd++;
+                    if (content[bfBraceEnd] == '{') braceCount++;
+                    else if (content[bfBraceEnd] == '}') braceCount--;
+                    bfBraceEnd++;
                 }
 
-                // Build the replacement BC
-                std::string newBC;
-                if (fieldType == "vector")
+                // Build the new boundaryField section with only oldInternalFaces
+                std::string newBoundaryField = "boundaryField\n{\n    oldInternalFaces\n    {\n";
+                word bcType;
+
+                if (fieldInBoundaryData)
                 {
-                    newBC = "oldInternalFaces\n    {\n        type            spaceTimeWindow;\n        dataDir         \"constant/boundaryData\";\n        fixesValue      true;\n        value           uniform (0 0 0);\n    }";
+                    // Field is in boundaryData - use spaceTimeWindow BC
+                    if (fieldType == "vector")
+                    {
+                        if (useInletOutletBC)
+                        {
+                            // With -inletOutletBC: U uses spaceTimeWindowInletOutlet
+                            newBoundaryField += "        type            spaceTimeWindowInletOutlet;\n";
+                            newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                            newBoundaryField += "        phi             phi;\n";
+                            newBoundaryField += "        allowTimeInterpolation  true;\n";
+                            newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                            newBoundaryField += "        value           uniform (0 0 0);\n";
+                            bcType = "spaceTimeWindowInletOutlet";
+                        }
+                        else
+                        {
+                            // Default: use spaceTimeWindow (Dirichlet)
+                            newBoundaryField += "        type            spaceTimeWindow;\n";
+                            newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                            newBoundaryField += "        fixesValue      true;\n";
+                            newBoundaryField += "        value           uniform (0 0 0);\n";
+                            bcType = "spaceTimeWindow";
+                        }
+                    }
+                    else
+                    {
+                        // Scalar field
+                        if (useInletOutletBC)
+                        {
+                            // With -inletOutletBC: scalar fields use zeroGradient
+                            newBoundaryField += "        type            zeroGradient;\n";
+                            bcType = "zeroGradient";
+                        }
+                        else
+                        {
+                            // Default: use spaceTimeWindow (Dirichlet)
+                            newBoundaryField += "        type            spaceTimeWindow;\n";
+                            newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                            newBoundaryField += "        fixesValue      true;\n";
+                            newBoundaryField += "        value           uniform 0;\n";
+                            bcType = "spaceTimeWindow";
+                        }
+                    }
                 }
                 else
                 {
-                    newBC = "oldInternalFaces\n    {\n        type            spaceTimeWindow;\n        dataDir         \"constant/boundaryData\";\n        fixesValue      true;\n        value           uniform 0;\n    }";
+                    // Field NOT in boundaryData - use zeroGradient (no time-varying data available)
+                    newBoundaryField += "        type            zeroGradient;\n";
+                    bcType = "zeroGradient (not in boundaryData)";
                 }
 
-                // Replace the old BC with the new one
-                content = content.substr(0, pos) + newBC + content.substr(braceEnd);
+                newBoundaryField += "    }\n}";
+
+                // Replace the entire boundaryField section
+                content = content.substr(0, boundaryPos) + newBoundaryField + content.substr(bfBraceEnd);
 
                 // Write back
                 std::ofstream ofs(fieldPath.c_str());
                 ofs << content;
                 ofs.close();
 
-                Info<< "    Updated: " << fieldName << " (oldInternalFaces -> spaceTimeWindow)" << endl;
+                Info<< "    Updated: " << fieldName << " (oldInternalFaces -> " << bcType << ")" << endl;
             }
         }
     }
 
-    // Also handle turbulence fields that exist in extract dir but weren't in extracted list
-    // (e.g., if nut was extracted separately)
-    wordList commonTurbFields = {"nut", "nuTilda", "k", "epsilon", "omega"};
-
-    for (const word& fieldName : commonTurbFields)
-    {
-        if (!extractedFields.found(fieldName))
-        {
-            // Check if the field already exists in extract dir
-            fileName fieldPath = extractDir / initialTimeDir / fieldName;
-            if (isFile(fieldPath))
-            {
-                // Apply same BC update
-                std::ifstream ifs(fieldPath.c_str());
-                std::ostringstream buffer;
-                buffer << ifs.rdbuf();
-                std::string content = buffer.str();
-                ifs.close();
-
-                std::string searchStart = "oldInternalFaces";
-                std::size_t pos = content.find(searchStart);
-
-                if (pos != std::string::npos)
-                {
-                    std::size_t braceStart = content.find('{', pos);
-                    if (braceStart != std::string::npos)
-                    {
-                        int braceCount = 1;
-                        std::size_t braceEnd = braceStart + 1;
-                        while (braceEnd < content.size() && braceCount > 0)
-                        {
-                            if (content[braceEnd] == '{') braceCount++;
-                            else if (content[braceEnd] == '}') braceCount--;
-                            braceEnd++;
-                        }
-
-                        std::string newBC = "oldInternalFaces\n    {\n        type            spaceTimeWindow;\n        dataDir         \"constant/boundaryData\";\n        fixesValue      true;\n        value           uniform 0;\n    }";
-                        content = content.substr(0, pos) + newBC + content.substr(braceEnd);
-
-                        std::ofstream ofs(fieldPath.c_str());
-                        ofs << content;
-                        ofs.close();
-
-                        Info<< "    Updated: " << fieldName << " (oldInternalFaces -> spaceTimeWindow)" << endl;
-                    }
-                }
-            }
-        }
-    }
+    // Note: All fields in the initial time directory are now handled by the loop above.
+    // Fields with boundaryData get spaceTimeWindow BC; fields without get zeroGradient.
 
     Info<< nl
         << "========================================" << nl

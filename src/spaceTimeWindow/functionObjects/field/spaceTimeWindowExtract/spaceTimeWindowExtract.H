@@ -53,7 +53,8 @@ Usage
         box             (0.05 -0.25 0.01) (0.90 0.25 0.38);
 
         outputDir       "../ufr2-02-subset"; // Output case directory
-        fields          (U p);              // Fields to extract
+        fields          (U);                // Fields for boundaryData (time-varying BC)
+        initialFields   (U p nut);          // Fields for initial conditions (optional)
 
         // Optional: write format for boundary data
         // Options: ascii, binary, deltaVarint
@@ -120,8 +121,12 @@ protected:
         //- Output directory
         fileName outputDir_;
 
-        //- Fields to extract
+        //- Fields to extract for boundaryData (time-varying BC)
         wordList fieldNames_;
+
+        //- Fields to extract for initial conditions (subset volume fields)
+        //  Defaults to fieldNames_ if not specified
+        wordList initialFieldNames_;
 
         //- Write format for boundary data (ascii or binary)
         IOstreamOption::streamFormat writeFormat_;

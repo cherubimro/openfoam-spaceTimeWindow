@@ -1,6 +1,7 @@
 codec/deltaVarintCodec.C
 codec/sodiumCrypto.C
 fvPatchFields/derived/spaceTimeWindowFvPatchField/spaceTimeWindowFvPatchFields.C
+fvPatchFields/derived/spaceTimeWindowInletOutletFvPatchField/spaceTimeWindowInletOutletFvPatchFields.C
 functionObjects/field/spaceTimeWindowExtract/spaceTimeWindowExtract.C
 
 LIB = $(FOAM_USER_LIBBIN)/libspaceTimeWindow

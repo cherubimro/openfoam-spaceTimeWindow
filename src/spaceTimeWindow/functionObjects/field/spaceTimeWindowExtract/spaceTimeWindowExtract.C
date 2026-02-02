@@ -29,6 +29,7 @@ License
 #include "globalIndex.H"
 #include "ListOps.H"
 #include "deltaVarintCodec.H"
+#include "deltaVarintTemporalCodec.H"
 #include "sodiumCrypto.H"
 #include <fstream>
 #include <type_traits>
@@ -1496,6 +1497,74 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     const Field<Type>& field
 ) const
 {
+    // Check if we should use delta-varint-temporal codec
+    if (useDeltaVarintTemporal_)
+    {
+        // Determine if this is a keyframe
+        // Keyframe if: first timestep (timestepCount_==0), or at keyframe interval
+        bool isKeyframe = (timestepCount_ == 0) ||
+                          ((timestepCount_ % dvztKeyframeInterval_) == 0);
+
+        if constexpr (std::is_same_v<Type, scalar>)
+        {
+            // Get previous field (nullptr for keyframe)
+            const scalarField* prevPtr = nullptr;
+            if (!isKeyframe && prevScalarFields_.found(fieldName))
+            {
+                prevPtr = &prevScalarFields_[fieldName];
+            }
+
+#ifdef FOAM_USE_SODIUM
+            if (useEncryption_)
+            {
+                std::vector<uint8_t> compressed = deltaVarintTemporalCodec::encode(
+                    field, prevPtr, isKeyframe, deltaVarintPrecision_);
+                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+                fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+
+                // Store current field for next timestep
+                prevScalarFields_.set(fieldName, field);
+                return;
+            }
+#endif
+            fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension());
+            deltaVarintTemporalCodec::write(outPath, field, prevPtr, isKeyframe, deltaVarintPrecision_);
+
+            // Store current field for next timestep
+            prevScalarFields_.set(fieldName, field);
+            return;
+        }
+        else if constexpr (std::is_same_v<Type, vector>)
+        {
+            const vectorField* prevPtr = nullptr;
+            if (!isKeyframe && prevVectorFields_.found(fieldName))
+            {
+                prevPtr = &prevVectorFields_[fieldName];
+            }
+
+#ifdef FOAM_USE_SODIUM
+            if (useEncryption_)
+            {
+                std::vector<uint8_t> compressed = deltaVarintTemporalCodec::encode(
+                    field, prevPtr, isKeyframe, deltaVarintPrecision_);
+                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
+                fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+
+                prevVectorFields_.set(fieldName, field);
+                return;
+            }
+#endif
+            fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension());
+            deltaVarintTemporalCodec::write(outPath, field, prevPtr, isKeyframe, deltaVarintPrecision_);
+
+            prevVectorFields_.set(fieldName, field);
+            return;
+        }
+        // For other types, fall through to standard format
+    }
+
     // Check if we should use delta-varint codec (only for scalar and vector)
     if (useDeltaVarint_)
     {
@@ -1619,7 +1688,11 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     writeFormat_(IOstreamOption::ASCII),
     writeCompression_(IOstreamOption::UNCOMPRESSED),
     useDeltaVarint_(false),
+    useDeltaVarintTemporal_(false),
     deltaVarintPrecision_(6),
+    dvztKeyframeInterval_(20),
+    prevScalarFields_(),
+    prevVectorFields_(),
     useEncryption_(false),
     publicKeyBase64_(),
     meshSubsetPtr_(),
@@ -1721,31 +1794,44 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
         initialFieldNames_ = fieldNames_;
     }
 
-    // Read write format (ascii, binary, or deltaVarint), default to ascii
+    // Read write format (ascii, binary, deltaVarint, or deltaVarintTemporal), default to ascii
     const word writeFormatStr = dict.getOrDefault<word>("writeFormat", "ascii");
     if (writeFormatStr == "binary")
     {
         writeFormat_ = IOstreamOption::BINARY;
         useDeltaVarint_ = false;
+        useDeltaVarintTemporal_ = false;
     }
     else if (writeFormatStr == "ascii")
     {
         writeFormat_ = IOstreamOption::ASCII;
         useDeltaVarint_ = false;
+        useDeltaVarintTemporal_ = false;
     }
     else if (writeFormatStr == "deltaVarint" || writeFormatStr == "dvz")
     {
-        // Delta-varint codec for high-efficiency compression
+        // Delta-varint codec for high-efficiency compression (spatial only)
         useDeltaVarint_ = true;
+        useDeltaVarintTemporal_ = false;
         writeFormat_ = IOstreamOption::BINARY;  // Not used but set for consistency
+    }
+    else if (writeFormatStr == "deltaVarintTemporal" || writeFormatStr == "dvzt")
+    {
+        // Delta-varint-temporal codec for maximum compression (spatial + temporal)
+        useDeltaVarint_ = false;
+        useDeltaVarintTemporal_ = true;
+        writeFormat_ = IOstreamOption::BINARY;
     }
     else
     {
         FatalIOErrorInFunction(dict)
             << "Invalid writeFormat '" << writeFormatStr << "'" << nl
-            << "Valid options are: ascii, binary, deltaVarint" << nl
+            << "Valid options are: ascii, binary, deltaVarint, deltaVarintTemporal" << nl
             << exit(FatalIOError);
     }
+
+    // Read optional keyframe interval for DVZT (default: 20 timesteps)
+    dvztKeyframeInterval_ = dict.getOrDefault<label>("dvztKeyframeInterval", 20);
 
     // Read delta-varint precision (significant digits)
     deltaVarintPrecision_ = dict.getOrDefault<label>("deltaVarintPrecision", 6);
@@ -1784,13 +1870,17 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
         << "    initialFields:         " << initialFieldNames_ << nl
         << "    writeFormat: " << writeFormatStr;
 
-    if (useDeltaVarint_)
+    if (useDeltaVarint_ || useDeltaVarintTemporal_)
     {
         Info<< " (precision: " << deltaVarintPrecision_ << " digits)";
+        if (useDeltaVarintTemporal_)
+        {
+            Info<< " (keyframe every " << dvztKeyframeInterval_ << " timesteps)";
+        }
     }
     Info<< nl;
 
-    if (!useDeltaVarint_)
+    if (!useDeltaVarint_ && !useDeltaVarintTemporal_)
     {
         Info<< "    writeCompression: " << writeCompressionStr << endl;
     }

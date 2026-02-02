@@ -149,9 +149,9 @@ functions
         initialFields   (U p nut);               // More fields for IC
 
         // Write format for boundary data (optional)
-        // Options: ascii, binary, deltaVarint
+        // Options: ascii, binary, deltaVarint, dvzt
         // Default: ascii
-        writeFormat     deltaVarint;
+        writeFormat     dvzt;
 
         // Precision for deltaVarint (optional, default: 6)
         deltaVarintPrecision  6;
@@ -173,7 +173,7 @@ functions
 | outputDir    | Output case directory for extracted data       | yes      | - |
 | fields       | List of fields for time-varying BC (boundaryData) | yes   | - |
 | initialFields | List of fields for initial conditions         | no       | same as fields |
-| writeFormat  | Format for boundary data: `ascii`, `binary`, or `deltaVarint` | no | ascii |
+| writeFormat  | Format for boundary data: `ascii`, `binary`, `deltaVarint`, or `dvzt` | no | ascii |
 | deltaVarintPrecision | Decimal digits for delta-varint quantization | no | 6 |
 | writeCompression | Gzip compression for ascii/binary (ignored for deltaVarint) | no | off |
 
@@ -388,9 +388,10 @@ The `writeFormat` parameter controls how boundary data files are written.
 | `binary` | (none) | ~50% | OpenFOAM native binary |
 | `ascii` + gzip | .gz | ~10% | `writeCompression on` |
 | `binary` + gzip | .gz | ~8% | Combined |
-| `deltaVarint` | .dvz | **~2.7%** | Best compression, recommended |
+| `deltaVarint` | .dvz | **~2.7%** | High compression, self-contained |
+| `dvzt` | .dvzt | **~2.4%** | Best compression, recommended |
 
-### Delta-Varint Codec
+### Delta-Varint Codec (DVZ)
 
 Specialized codec optimized for CFD boundary data:
 
@@ -408,6 +409,60 @@ Specialized codec optimized for CFD boundary data:
 writeFormat     deltaVarint;
 deltaVarintPrecision  6;    // ~1e-6 relative precision
 ```
+
+### Delta-Varint-Temporal Codec (DVZT)
+
+Enhanced codec that exploits both spatial and temporal correlation for better compression:
+
+1. **Keyframes** (every N timesteps): Self-contained, same as DVZ
+2. **Delta frames**: Hybrid spatial-temporal prediction
+   - Uses weighted prediction: `predicted = 0.3 * spatial_neighbor + 0.7 * temporal_neighbor`
+   - Encodes residuals (actual - predicted) instead of raw spatial deltas
+   - Typically ~10% smaller than DVZ for delta frames
+
+```cpp
+writeFormat     dvzt;
+deltaVarintPrecision  6;        // ~1e-6 relative precision
+dvztKeyframeInterval  20;       // Keyframe every 20 timesteps (default)
+```
+
+**DVZT Workflow:**
+
+During extraction, DVZT writes smaller .dvzt files. During case initialization, `spaceTimeWindowInitCase` automatically converts .dvzt files to .dvz format (required because delta frames need sequential processing). The resulting .dvz files are read by the spaceTimeWindow BC at runtime.
+
+```
+Extraction:  sim.dvzt files (~10% smaller than .dvz)
+     |
+     v
+spaceTimeWindowInitCase:  Converts .dvzt -> .dvz (sequential)
+     |
+     v
+Runtime:  Reads .dvz files (no changes to BC code)
+```
+
+**When to use DVZT:**
+- Long simulations with many timesteps (storage savings accumulate)
+- Network/disk bandwidth constraints during extraction
+- Small timesteps (Δt = 1e-5 or 1e-6) where temporal correlation is very strong
+- DNS or acoustic simulations requiring fine temporal resolution
+
+**Compression vs Timestep Size:**
+
+DVZT benefits increase dramatically with smaller timesteps because consecutive values become nearly identical:
+
+| Δt | Temporal Correlation | DVZT vs DVZ Savings |
+|----|---------------------|---------------------|
+| 1e-4 | Moderate | ~10% smaller |
+| 1e-5 | Strong | ~20-30% smaller |
+| 1e-6 | Very strong | ~30-50% smaller |
+
+With very small Δt, most temporal residuals quantize to near-zero values, requiring only 1 byte each in varint encoding.
+
+**When to use DVZ:**
+- Simpler workflow (no conversion step)
+- When random access to individual timesteps is needed during extraction
+- Shorter simulations where DVZT overhead isn't worth it
+- Large timesteps where temporal correlation is weak
 
 ## Encryption (Optional)
 

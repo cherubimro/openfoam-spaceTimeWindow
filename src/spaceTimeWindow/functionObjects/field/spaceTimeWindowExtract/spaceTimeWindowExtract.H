@@ -137,8 +137,18 @@ protected:
         //- Use delta-varint codec for high-efficiency compression
         bool useDeltaVarint_;
 
+        //- Use delta-varint-temporal codec for even higher compression
+        bool useDeltaVarintTemporal_;
+
         //- Precision for delta-varint codec (number of significant digits)
         label deltaVarintPrecision_;
+
+        //- Keyframe interval for DVZT (timesteps between keyframes)
+        label dvztKeyframeInterval_;
+
+        //- Previous timestep face values for DVZT temporal encoding
+        mutable HashTable<scalarField> prevScalarFields_;
+        mutable HashTable<vectorField> prevVectorFields_;
 
         //- Enable encryption of boundary data
         bool useEncryption_;

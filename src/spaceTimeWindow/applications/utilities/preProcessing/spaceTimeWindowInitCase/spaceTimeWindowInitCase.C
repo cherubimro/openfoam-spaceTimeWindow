@@ -58,6 +58,7 @@ Usage
 #include "SortableList.H"
 #include "boundBox.H"
 #include "deltaVarintCodec.H"
+#include "deltaVarintTemporalCodec.H"
 #include "sodiumCrypto.H"
 #include <fstream>
 #include <sstream>
@@ -290,6 +291,167 @@ word decryptBoundaryFile
 
     return word::null;
 #endif
+}
+
+
+// Convert all DVZT (delta-varint-temporal) files to DVZ (delta-varint) in boundaryData
+// DVZT requires sequential processing because delta frames need previous timestep data
+// Output is DVZ format which the spaceTimeWindow BC can handle at runtime
+// Returns the number of files converted
+label convertDvztToDvzBoundaryData
+(
+    const fileName& patchBoundaryDir,
+    const DynamicList<Tuple2<scalar, word>>& timeList,  // Must be sorted by time!
+    label dvzPrecision = 6,
+    bool verbose = true
+)
+{
+    const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
+    const word dvzExt = "." + deltaVarintCodec::fileExtension();
+    label totalConverted = 0;
+
+    // Track previous timestep fields for each field name
+    // Needed for delta frame decompression
+    HashTable<scalarField> prevScalarFields;
+    HashTable<vectorField> prevVectorFields;
+
+    Info<< nl << "Converting DVZT to DVZ boundary data files..." << endl;
+    Info<< "    (Sequential processing required for temporal delta frames)" << endl;
+    Info<< "    Output: DVZ format (spaceTimeWindow BC handles at runtime)" << endl;
+
+    // Process timesteps in chronological order (essential for DVZT!)
+    for (const auto& timePair : timeList)
+    {
+        const word& timeName = timePair.second();
+        fileName timeDir = patchBoundaryDir / timeName;
+
+        // Get all files in this time directory
+        fileNameList files = readDir(timeDir, fileName::FILE);
+
+        for (const fileName& f : files)
+        {
+            // Check if it's a DVZT file
+            if (!f.ends_with(dvztExt))
+            {
+                continue;
+            }
+
+            // Get base field name (strip .dvzt extension)
+            word baseFieldName = f.substr(0, f.size() - dvztExt.size());
+            fileName dvztPath = timeDir / f;
+            fileName dvzOutputPath = timeDir / (baseFieldName + dvzExt);
+
+            // Check if file is a keyframe or delta frame
+            bool isKeyframe = deltaVarintTemporalCodec::isKeyframe(dvztPath);
+
+            // Read the DVZT file to determine type (scalar or vector)
+            // Read header to get nComponents
+            std::ifstream ifs(dvztPath.c_str(), std::ios::binary);
+            if (!ifs)
+            {
+                WarningInFunction
+                    << "Cannot open DVZT file: " << dvztPath << endl;
+                continue;
+            }
+
+            // Read header: magic(4) + nFaces(4) + nComponents(4) + precision(4) + flags(4)
+            uint32_t magic, nFaces, nComponents, precision, flags;
+            ifs.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            ifs.read(reinterpret_cast<char*>(&nFaces), sizeof(nFaces));
+            ifs.read(reinterpret_cast<char*>(&nComponents), sizeof(nComponents));
+            ifs.read(reinterpret_cast<char*>(&precision), sizeof(precision));
+            ifs.close();
+
+            // Verify magic number
+            if (magic != deltaVarintTemporalCodec::magic())
+            {
+                WarningInFunction
+                    << "Invalid DVZT magic number in: " << dvztPath << endl;
+                continue;
+            }
+
+            // Use precision from DVZT file for DVZ output
+            uint32_t outputPrecision = (precision > 0) ? precision : dvzPrecision;
+
+            if (nComponents == 3)
+            {
+                // Vector field
+                const vectorField* prevPtr = nullptr;
+                if (!isKeyframe && prevVectorFields.found(baseFieldName))
+                {
+                    prevPtr = &prevVectorFields[baseFieldName];
+                }
+                else if (!isKeyframe)
+                {
+                    FatalErrorInFunction
+                        << "DVZT delta frame requires previous timestep data" << nl
+                        << "    File: " << dvztPath << nl
+                        << "    Field: " << baseFieldName << nl
+                        << "    This usually means timesteps are out of order" << nl
+                        << exit(FatalError);
+                }
+
+                // Decompress DVZT
+                vectorField field = deltaVarintTemporalCodec::readVector(dvztPath, prevPtr);
+
+                // Store for next timestep
+                prevVectorFields.set(baseFieldName, field);
+
+                // Write as DVZ format
+                deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+
+                if (verbose)
+                {
+                    Info<< "    Converted: " << f << " -> " << baseFieldName << dvzExt
+                        << " (vector, " << field.size() << " values, "
+                        << (isKeyframe ? "keyframe" : "delta") << ")" << endl;
+                }
+            }
+            else
+            {
+                // Scalar field
+                const scalarField* prevPtr = nullptr;
+                if (!isKeyframe && prevScalarFields.found(baseFieldName))
+                {
+                    prevPtr = &prevScalarFields[baseFieldName];
+                }
+                else if (!isKeyframe)
+                {
+                    FatalErrorInFunction
+                        << "DVZT delta frame requires previous timestep data" << nl
+                        << "    File: " << dvztPath << nl
+                        << "    Field: " << baseFieldName << nl
+                        << "    This usually means timesteps are out of order" << nl
+                        << exit(FatalError);
+                }
+
+                // Decompress DVZT
+                scalarField field = deltaVarintTemporalCodec::readScalar(dvztPath, prevPtr);
+
+                // Store for next timestep
+                prevScalarFields.set(baseFieldName, field);
+
+                // Write as DVZ format
+                deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+
+                if (verbose)
+                {
+                    Info<< "    Converted: " << f << " -> " << baseFieldName << dvzExt
+                        << " (scalar, " << field.size() << " values, "
+                        << (isKeyframe ? "keyframe" : "delta") << ")" << endl;
+                }
+            }
+
+            // Remove the DVZT file after successful conversion
+            rm(dvztPath);
+            totalConverted++;
+        }
+    }
+
+    Info<< "    Converted " << totalConverted << " DVZT files to DVZ across "
+        << timeList.size() << " timesteps" << nl << endl;
+
+    return totalConverted;
 }
 
 
@@ -1094,6 +1256,32 @@ int main(int argc, char *argv[])
 #endif
     }
 
+    // Check for DVZT (delta-varint-temporal) compressed files and decompress them
+    // DVZT files require sequential decompression because delta frames depend on previous timesteps
+    // Check by looking for .dvzt files in the first time directory
+    {
+        fileName firstTimeDir = patchBoundaryDir / timeList.first().second();
+        fileNameList files = readDir(firstTimeDir, fileName::FILE);
+        bool hasDvzt = false;
+        const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
+
+        for (const fileName& f : files)
+        {
+            if (f.ends_with(dvztExt))
+            {
+                hasDvzt = true;
+                break;
+            }
+        }
+
+        if (hasDvzt)
+        {
+            // Convert all DVZT files to DVZ (must be done sequentially in time order)
+            // The resulting DVZ files are identical to what direct DVZ extraction produces
+            convertDvztToDvzBoundaryData(patchBoundaryDir, timeList, 6, false);
+        }
+    }
+
     // Create target directories
     mkDir(extractDir / "system");
     mkDir(extractDir / "constant");
@@ -1743,10 +1931,15 @@ int main(int argc, char *argv[])
         {
             if (f != "points" && f != "extractionMetadata")
             {
-                // Strip .dvz extension if present
+                // Strip compression extensions if present (.dvz or .dvzt)
                 word fieldName = f;
+                const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
                 const word dvzExt = "." + deltaVarintCodec::fileExtension();
-                if (fieldName.ends_with(dvzExt))
+                if (fieldName.ends_with(dvztExt))
+                {
+                    fieldName = fieldName.substr(0, fieldName.size() - dvztExt.size());
+                }
+                else if (fieldName.ends_with(dvzExt))
                 {
                     fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
                 }
@@ -2230,10 +2423,15 @@ int main(int argc, char *argv[])
     {
         if (f != "points" && f != "extractionMetadata")
         {
-            // Strip .dvz extension if present
+            // Strip compression extensions if present (.dvz or .dvzt)
             word fieldName = f;
+            const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
             const word dvzExt = "." + deltaVarintCodec::fileExtension();
-            if (fieldName.ends_with(dvzExt))
+            if (fieldName.ends_with(dvztExt))
+            {
+                fieldName = fieldName.substr(0, fieldName.size() - dvztExt.size());
+            }
+            else if (fieldName.ends_with(dvzExt))
             {
                 fieldName = fieldName.substr(0, fieldName.size() - dvzExt.size());
             }

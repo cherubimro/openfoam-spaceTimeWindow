@@ -6,20 +6,30 @@ cd "${0%/*}" || exit                                # Run from this directory
 # Check for 'doc' argument to build documentation only
 if [ "$1" = "doc" ]; then
     echo "Building documentation..."
-    if ! command -v doxygen >/dev/null 2>&1; then
-        echo "Error: doxygen not found. Install doxygen to build documentation."
-        exit 1
+
+    # Build LaTeX tutorial if pdflatex is available
+    if command -v pdflatex >/dev/null 2>&1; then
+        echo "Building tutorial PDF..."
+        cd doc
+        pdflatex -interaction=nonstopmode tutorial.tex > /dev/null
+        pdflatex -interaction=nonstopmode tutorial.tex > /dev/null
+        cd ..
+        echo "Tutorial built: doc/tutorial.pdf"
+    else
+        echo "Warning: pdflatex not found, skipping tutorial PDF"
     fi
 
-    # Generate HTML documentation
-    doxygen doc/Doxyfile
+    # Generate Doxygen HTML documentation if available
+    if command -v doxygen >/dev/null 2>&1; then
+        echo "Building Doxygen HTML documentation..."
+        doxygen doc/Doxyfile
+        echo "Doxygen documentation built: doc/html/index.html"
+    else
+        echo "Warning: doxygen not found, skipping HTML documentation"
+    fi
 
     echo ""
-    echo "Documentation built: doc/html/index.html"
-    echo ""
-    echo "Note: PDF generation is disabled due to tabu package compatibility issues"
-    echo "      with modern LaTeX distributions. The existing refman.pdf in the repo"
-    echo "      can be used, or regenerate manually with a compatible LaTeX setup."
+    echo "Documentation build complete."
     exit 0
 fi
 

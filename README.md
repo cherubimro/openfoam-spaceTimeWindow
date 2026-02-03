@@ -90,10 +90,12 @@ In serial mode:
 
 ### Parallel Execution
 
+Both the source simulation (extraction phase) and the reconstruction simulation can run in parallel. This enables efficient use of HPC resources for both phases of the workflow.
+
 ```bash
 # 1. Run extraction during parallel simulation
 cd source-case
-mpirun -np 4 pimpleFoam -parallel    # Extraction happens automatically
+mpirun -np 8 pimpleFoam -parallel    # Extraction happens automatically
 
 # 2. Reconstruct the start time (t_2 for cubic interpolation)
 reconstructPar -time 0.0002
@@ -103,7 +105,9 @@ cd ../subset-case
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 
 # 4. Run reconstruction (serial or parallel)
-pimpleFoam
+pimpleFoam                           # Serial
+# OR
+decomposePar && mpirun -np 4 pimpleFoam -parallel   # Parallel
 ```
 
 In parallel mode:
@@ -112,11 +116,13 @@ In parallel mode:
 - Only extraction box parameters are written (not mesh) - `spaceTimeWindowInitCase` creates the mesh
 - `reconstructPar` must be run at the reconstruction start time (t_2) to provide source fields
 
+**Tip:** The reconstruction case is typically much smaller than the source case, so fewer processors may be needed. The spaceTimeWindow boundary conditions work identically in serial and parallel modes.
+
 ### Time Interpolation Modes
 
 | Mode | Start Time | Timesteps Used | Use Case |
 |------|------------|----------------|----------|
-| `none` (exact) | t_0 | 1 (exact match) | "Bit"-reproducible results |
+| `none` (exact) | t_0 | 1 (exact match) | "Bit"-reproducible results (highest fidelity) |
 | `linear` | t_1 | 2 (bracketing) | Simple, smoothly varying flows |
 | `cubic` | t_2 | 4 (Catmull-Rom) | Unsteady turbulent flows (recommended) |
 
@@ -234,9 +240,11 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 | -outletFraction  | Fraction of box extent for outlet region (default: 0.1) | no |
 | -correctMassFlux | Apply least-squares mass flux correction to boundaryData | no |
 | -initialFields   | Override initial fields list (e.g., "(U p nut k)") | no |
+| -refineLevel     | Refine mesh N times (each level splits cells ×8) | no |
+| -coarsenLevel    | Coarsen mesh N times (each level merges cells)   | no |
 | -overwrite       | Overwrite existing files                         | no       |
 
-**Note:** `-inletOutletBC` and `-outletDirection` are mutually exclusive.
+**Note:** `-inletOutletBC` and `-outletDirection` are mutually exclusive. `-refineLevel` and `-coarsenLevel` are also mutually exclusive.
 
 **What it creates:**
 
@@ -594,9 +602,49 @@ cd examples/ufr2-02
 ./Allrun
 ```
 
+## Mesh Coarsening and Refinement
+
+The reconstruction mesh can be coarsened or refined relative to the extraction mesh, enabling simulations at different resolutions than the original.
+
+```bash
+# Refine mesh (finer than extraction)
+spaceTimeWindowInitCase -sourceCase ../source -inletOutletBC -refineLevel 1
+
+# Coarsen mesh (coarser than extraction)
+spaceTimeWindowInitCase -sourceCase ../source -inletOutletBC -coarsenLevel 1
+
+# Multiple levels (each level = 8× cell count change)
+spaceTimeWindowInitCase -sourceCase ../source -inletOutletBC -refineLevel 2
+```
+
+### Spatial Interpolation Algorithms
+
+When the reconstruction mesh differs from the extraction mesh, spatial interpolation is required for boundary data. The spaceTimeWindow boundary conditions handle this automatically at runtime:
+
+**Refinement** (more target faces than source): **Barycentric interpolation with 2D Delaunay triangulation**
+- Source face centers are triangulated using the Bowyer-Watson algorithm
+- For each target face center, the enclosing triangle is found and barycentric weights computed
+- If the target point lies outside all triangles (due to irregular submesh boundaries from original cell shapes), the algorithm finds the nearest triangle by centroid distance and uses clamped barycentric coordinates
+- Provides smooth C⁰ continuous interpolation
+
+**Coarsening** (fewer target faces than source): **Area-weighted averaging**
+- An octree is built from source points for efficient spatial lookup
+- For each target face, all source points within a search radius are averaged with equal weights
+- Search radius is progressively expanded if no points are found
+- Ensures conservation of integral quantities
+
+The interpolation works on 2D point clouds. Points are grouped by which face of the extraction bounding box they belong to (6 planar surfaces: ±X, ±Y, ±Z), then projected to 2D by dropping the constant coordinate. This handles the irregular face distribution that arises from extracting a submesh with original cell shapes.
+
+### Initial Field Interpolation
+
+Initial fields are also interpolated when mesh resolution changes:
+- **Refinement**: Uses `mapFields` with cell-center interpolation
+- **Coarsening**: Uses volume-weighted averaging of source cells
+
+**Note:** Spatial interpolation introduces smoothing, particularly for coarsening. For turbulent flows, this may affect small-scale structures. Consider the trade-off between computational cost and resolution fidelity.
+
 ## Limitations
 
-- No spatial interpolation - mesh topology must match exactly
 - No temporal extrapolation - boundary data must cover full reconstruction time range
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`

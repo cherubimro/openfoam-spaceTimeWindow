@@ -643,6 +643,106 @@ Initial fields are also interpolated when mesh resolution changes:
 
 **Note:** Spatial interpolation introduces smoothing, particularly for coarsening. For turbulent flows, this may affect small-scale structures. Consider the trade-off between computational cost and resolution fidelity.
 
+## External Compression Benchmark
+
+DVZ and DVZT files can be further compressed using external tools for archival or transfer. The following benchmarks compare various compression algorithms on real boundary data files.
+
+### Test Data
+
+| Format | Files | Total Size | Description |
+|--------|-------|------------|-------------|
+| DVZ | 618 | 13 MB | Spatial delta-varint encoded |
+| DVZT | 938 | 30 MB | Temporal delta-varint encoded |
+
+### DVZ Files Compression Results
+
+| Method | Size | Ratio | Speed | Notes |
+|--------|------|-------|-------|-------|
+| 7z lzma2 -mx9 | 769 KB | 6.01% | 11.2 MB/s | **Best ratio** |
+| 7z lzma -mx9 | 770 KB | 6.02% | 11.4 MB/s | |
+| xz -9 | 769 KB | 6.01% | 10.1 MB/s | |
+| xz -6 | 769 KB | 6.01% | 10.2 MB/s | |
+| xz -1 | 1.5 MB | 11.37% | 36.0 MB/s | |
+| zstd --ultra -22 | 964 KB | 7.53% | 4.7 MB/s | Very slow |
+| zstd -19 | 965 KB | 7.54% | 15.3 MB/s | |
+| rar -m5 | 1017 KB | 7.95% | 26.9 MB/s | |
+| rar -m3 | 1019 KB | 7.96% | 45.1 MB/s | |
+| 7z ppmd -mx9 | 1.4 MB | 11.02% | 10.7 MB/s | |
+| 7z lzma2 -mx1 | 1.5 MB | 11.79% | 137.6 MB/s | |
+| 7z lzma -mx1 | 1.5 MB | 11.60% | 48.8 MB/s | |
+| zstd -9 | 1.7 MB | 13.17% | 109.5 MB/s | |
+| 7z ppmd -mx5 | 1.7 MB | 13.13% | 15.2 MB/s | |
+| zstd -3 | 1.8 MB | 13.65% | 309.0 MB/s | **Best balance** |
+| zstd -1 | 1.9 MB | 14.43% | 533.7 MB/s | |
+| bzip2 -9 | 2.0 MB | 15.28% | 13.5 MB/s | |
+| bzip2 -5 | 2.0 MB | 15.50% | 13.7 MB/s | |
+| lz4 -9 | 2.1 MB | 16.11% | 152.7 MB/s | |
+| gzip -9 | 2.1 MB | 16.38% | 62.9 MB/s | |
+| gzip -6 | 2.1 MB | 16.39% | 94.2 MB/s | |
+| gzip -1 | 2.2 MB | 17.17% | 146.4 MB/s | |
+| bzip2 -1 | 2.2 MB | 17.57% | 13.9 MB/s | |
+| lz4 | 2.3 MB | 17.80% | 635.2 MB/s | **Fastest** |
+
+### DVZT Files Compression Results
+
+| Method | Size | Ratio | Speed | Notes |
+|--------|------|-------|-------|-------|
+| 7z lzma2 -mx9 | 1.9 MB | 6.31% | 10.1 MB/s | **Best ratio** |
+| 7z lzma -mx9 | 1.9 MB | 6.31% | 11.5 MB/s | |
+| xz -9 | 1.9 MB | 6.31% | 9.3 MB/s | |
+| xz -6 | 1.9 MB | 6.32% | 10.5 MB/s | |
+| 7z lzma2 -mx5 | 2.0 MB | 6.40% | 17.1 MB/s | |
+| 7z lzma -mx5 | 2.0 MB | 6.40% | 17.2 MB/s | |
+| xz -1 | 2.4 MB | 7.97% | 42.3 MB/s | |
+| 7z lzma -mx1 | 2.4 MB | 7.98% | 65.4 MB/s | |
+| 7z lzma2 -mx1 | 2.5 MB | 8.24% | 219.4 MB/s | |
+| zstd --ultra -22 | 2.6 MB | 8.48% | 2.4 MB/s | Very slow |
+| zstd -19 | 2.6 MB | 8.50% | 10.4 MB/s | |
+| rar -m5 | 2.8 MB | 9.28% | 28.0 MB/s | |
+| rar -m3 | 2.8 MB | 9.29% | 46.8 MB/s | |
+| zstd -9 | 2.8 MB | 9.27% | 120.6 MB/s | |
+| 7z ppmd -mx9 | 2.8 MB | 9.37% | 12.2 MB/s | |
+| zstd -3 | 3.1 MB | 10.10% | 396.1 MB/s | **Best balance** |
+| zstd -1 | 3.1 MB | 10.25% | 614.0 MB/s | |
+| 7z ppmd -mx5 | 3.1 MB | 10.10% | 20.6 MB/s | |
+| bzip2 -9 | 3.5 MB | 11.52% | 13.7 MB/s | |
+| lz4 -9 | 3.5 MB | 11.50% | 190.0 MB/s | |
+| bzip2 -5 | 3.5 MB | 11.76% | 14.2 MB/s | |
+| gzip -9 | 3.8 MB | 12.69% | 79.5 MB/s | |
+| gzip -6 | 3.8 MB | 12.71% | 104.3 MB/s | |
+| bzip2 -1 | 4.1 MB | 13.60% | 13.9 MB/s | |
+| lz4 | 4.1 MB | 13.56% | 763.0 MB/s | **Fastest** |
+| gzip -1 | 4.4 MB | 14.50% | 163.7 MB/s | |
+
+### Recommendations
+
+| Use Case | Method | Ratio | Speed | Command |
+|----------|--------|-------|-------|---------|
+| **Runtime (CFD)** | zstd -3 | ~10% | 300-400 MB/s | `zstd -3 file.dvz` |
+| **Archive/Transfer** | 7z lzma2 -mx9 | ~6% | 10-11 MB/s | `7z a -m0=lzma2 -mx=9 archive.7z *.dvz` |
+| **Real-time streaming** | lz4 | ~14-18% | 600-800 MB/s | `lz4 file.dvz` |
+| **Quick compression** | zstd -1 | ~10-14% | 500-600 MB/s | `zstd -1 file.dvz` |
+
+### Key Findings
+
+1. **Best compression ratio**: 7z LZMA2 and xz achieve ~6% (94% reduction)
+2. **Best speed/ratio balance**: zstd -3 at 10% ratio with 300-400 MB/s throughput
+3. **zstd -3 is 40× faster than xz** with only 60% more space
+4. **DVZT compresses slightly better than DVZ** due to temporal correlation patterns
+5. **zstd --ultra -22 provides no benefit** over zstd -19 for this data type
+6. **bzip2 and PPMd perform poorly** for CFD boundary data
+
+### Archival Example
+
+```bash
+# Archive all boundary data with best compression
+cd subset-case/constant/boundaryData/oldInternalFaces
+7z a -m0=lzma2 -mx=9 ../boundaryData.7z */U.dvz */U.dvzt
+
+# Or with zstd for faster compression
+tar -cf - */U.dvz */U.dvzt | zstd -3 > ../boundaryData.tar.zst
+```
+
 ## Limitations
 
 - No temporal extrapolation - boundary data must cover full reconstruction time range

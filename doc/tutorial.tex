@@ -2061,6 +2061,85 @@ $10^{-6}$ & Very strong & $\sim$30--50\% smaller \\
     \item Large timesteps where temporal correlation is weak
 \end{itemize}
 
+\subsubsection{External Compression Benchmark}
+
+DVZ and DVZT files can be further compressed using external tools for archival or transfer. \Cref{tab:ext-compression-dvz,tab:ext-compression-dvzt} present benchmark results comparing various compression algorithms on real boundary data files (618 DVZ files totaling 13~MB, and 938 DVZT files totaling 30~MB).
+
+\begin{table}[htbp]
+\centering
+\caption{External compression results for DVZ files (13~MB original)}
+\label{tab:ext-compression-dvz}
+\small
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+\textbf{Method} & \textbf{Size} & \textbf{Ratio} & \textbf{Speed} & \textbf{Notes} \\
+\midrule
+7z lzma2 -mx9 & 769~KB & 6.01\% & 11.2~MB/s & Best ratio \\
+xz -6 & 769~KB & 6.01\% & 10.2~MB/s & \\
+zstd --ultra -22 & 964~KB & 7.53\% & 4.7~MB/s & Very slow \\
+zstd -19 & 965~KB & 7.54\% & 15.3~MB/s & \\
+rar -m5 & 1017~KB & 7.95\% & 26.9~MB/s & \\
+7z ppmd -mx9 & 1.4~MB & 11.02\% & 10.7~MB/s & \\
+zstd -9 & 1.7~MB & 13.17\% & 109.5~MB/s & \\
+zstd -3 & 1.8~MB & 13.65\% & 309.0~MB/s & Best balance \\
+zstd -1 & 1.9~MB & 14.43\% & 533.7~MB/s & \\
+bzip2 -9 & 2.0~MB & 15.28\% & 13.5~MB/s & \\
+gzip -6 & 2.1~MB & 16.39\% & 94.2~MB/s & \\
+lz4 & 2.3~MB & 17.80\% & 635.2~MB/s & Fastest \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{External compression results for DVZT files (30~MB original)}
+\label{tab:ext-compression-dvzt}
+\small
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+\textbf{Method} & \textbf{Size} & \textbf{Ratio} & \textbf{Speed} & \textbf{Notes} \\
+\midrule
+7z lzma2 -mx9 & 1.9~MB & 6.31\% & 10.1~MB/s & Best ratio \\
+xz -6 & 1.9~MB & 6.32\% & 10.5~MB/s & \\
+zstd --ultra -22 & 2.6~MB & 8.48\% & 2.4~MB/s & Very slow \\
+zstd -19 & 2.6~MB & 8.50\% & 10.4~MB/s & \\
+rar -m5 & 2.8~MB & 9.28\% & 28.0~MB/s & \\
+zstd -9 & 2.8~MB & 9.27\% & 120.6~MB/s & \\
+7z ppmd -mx9 & 2.8~MB & 9.37\% & 12.2~MB/s & \\
+zstd -3 & 3.1~MB & 10.10\% & 396.1~MB/s & Best balance \\
+zstd -1 & 3.1~MB & 10.25\% & 614.0~MB/s & \\
+bzip2 -9 & 3.5~MB & 11.52\% & 13.7~MB/s & \\
+gzip -6 & 3.8~MB & 12.71\% & 104.3~MB/s & \\
+lz4 & 4.1~MB & 13.56\% & 763.0~MB/s & Fastest \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key findings:}
+\begin{itemize}
+    \item \textbf{Best compression ratio}: 7z LZMA2 and xz achieve $\sim$6\% (94\% reduction)
+    \item \textbf{Best speed/ratio balance}: zstd -3 at 10--14\% ratio with 300--400~MB/s throughput
+    \item \textbf{zstd -3 is 40$\times$ faster than xz} with only 60\% more space
+    \item \textbf{zstd --ultra -22 provides no benefit} over zstd -19 for this data type
+    \item \textbf{bzip2 and PPMd perform poorly} for CFD boundary data
+\end{itemize}
+
+\textbf{Recommendations:}
+\begin{itemize}
+    \item \textbf{Runtime/on-the-fly}: zstd -3 ($\sim$10\% ratio, 300--400~MB/s)
+    \item \textbf{Archive/transfer}: 7z lzma2 -mx9 or xz -6 ($\sim$6\% ratio, 10~MB/s)
+    \item \textbf{Real-time streaming}: lz4 ($\sim$14--18\% ratio, 600--800~MB/s)
+\end{itemize}
+
+\begin{lstlisting}[language=bash,caption={Archival compression example}]
+# Archive with best compression (7z)
+cd subset-case/constant/boundaryData/oldInternalFaces
+7z a -m0=lzma2 -mx=9 ../boundaryData.7z */U.dvz */U.dvzt
+
+# Or with zstd for faster compression
+tar -cf - */U.dvz */U.dvzt | zstd -3 > ../boundaryData.tar.zst
+\end{lstlisting}
+
 \subsection{Extraction Metadata}
 
 The \texttt{extractionMetadata} file contains:

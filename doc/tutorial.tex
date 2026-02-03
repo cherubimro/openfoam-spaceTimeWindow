@@ -2063,7 +2063,18 @@ $10^{-6}$ & Very strong & $\sim$30--50\% smaller \\
 
 \subsubsection{External Compression Benchmark}
 
-DVZ and DVZT files can be further compressed using external tools for archival or transfer. \Cref{tab:ext-compression-dvz,tab:ext-compression-dvzt} present benchmark results comparing various compression algorithms on real boundary data files (618 DVZ files totaling 13~MB, and 938 DVZT files totaling 30~MB).
+DVZ and DVZT files can be further compressed using external tools for archival or transfer. The following benchmarks compare various compression algorithms on real boundary data files.
+
+\textbf{Test Environment:}
+\begin{itemize}
+    \item \textbf{CPU}: Intel Core i7-4790 @ 3.60~GHz (4 cores, 8 threads, Haswell microarchitecture)
+    \item \textbf{L3 Cache}: 8~MB
+    \item \textbf{RAM}: DDR3-1600
+\end{itemize}
+
+\textbf{Test Data:} 618 DVZ files totaling 13~MB (spatial delta-varint encoded), and 938 DVZT files totaling 30~MB (temporal delta-varint encoded).
+
+The compression results are presented in \cref{tab:ext-compression-dvz} for DVZ files and \cref{tab:ext-compression-dvzt} for DVZT files.
 
 \begin{table}[htbp]
 \centering

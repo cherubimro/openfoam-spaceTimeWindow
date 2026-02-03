@@ -647,12 +647,20 @@ Initial fields are also interpolated when mesh resolution changes:
 
 DVZ and DVZT files can be further compressed using external tools for archival or transfer. The following benchmarks compare various compression algorithms on real boundary data files.
 
+### Test Environment
+
+- **CPU**: Intel Core i7-4790 @ 3.60 GHz (4 cores, 8 threads, Haswell)
+- **L3 Cache**: 8 MB
+- **RAM**: DDR3-1600
+
 ### Test Data
 
 | Format | Files | Total Size | Description |
 |--------|-------|------------|-------------|
 | DVZ | 618 | 13 MB | Spatial delta-varint encoded |
 | DVZT | 938 | 30 MB | Temporal delta-varint encoded |
+
+The compression results for DVZ files are shown in the DVZ Files Compression Results table below, and DVZT results in the DVZT Files Compression Results table.
 
 ### DVZ Files Compression Results
 

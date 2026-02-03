@@ -42,7 +42,7 @@
 \usepackage{graphicx}
 \usepackage[dvipsnames,svgnames,x11names]{xcolor}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,patterns,positioning,decorations.pathmorphing,shadows}
+\usetikzlibrary{arrows.meta,patterns,positioning,decorations.pathmorphing,decorations.pathreplacing,shadows,shapes.geometric}
 
 % Primary color palette - professional blue theme (print-friendly)
 \definecolor{primaryblue}{HTML}{2563EB}      % Vibrant blue - main accent
@@ -485,6 +485,914 @@ export FOAM_USE_SODIUM=1 && wmake
 cd ../spaceTimeWindowKeygen
 export FOAM_USE_SODIUM=1 && wmake
 \end{lstlisting}
+
+% ----------------------------------------------------------------------------
+% CONCEPT
+% ----------------------------------------------------------------------------
+
+\section{Concept: Space-Time Window Extraction and Reconstruction}
+\label{sec:concept}
+
+This section introduces the fundamental concepts behind space-time window extraction and reconstruction. Understanding these concepts is essential before diving into the technical implementation details.
+
+\subsection{The Challenge of Large-Scale CFD Simulations}
+
+Modern computational fluid dynamics (CFD) simulations, particularly Large Eddy Simulations (LES) and Direct Numerical Simulations (DNS), generate enormous amounts of data. A typical industrial LES simulation might involve:
+
+\begin{itemize}
+    \item Meshes with $10^7$--$10^9$ cells
+    \item Thousands of timesteps
+    \item Multiple field variables (velocity, pressure, turbulence quantities)
+    \item Terabytes to petabytes of raw output data
+\end{itemize}
+
+Storing and post-processing this data is often impractical. The space-time window approach addresses this by extracting only the data needed to reconstruct the flow in a \emph{region of interest} at a later time.
+
+\subsection{The Space-Time Window Concept}
+
+A \textbf{space-time window} is a bounded region in both space (a 3D box) and time (a time interval) from which we extract the information necessary to reconstruct the flow field. The key insight is that we only need:
+
+\begin{enumerate}
+    \item \textbf{Initial conditions}: The complete field state at one timestep ($t_0$)
+    \item \textbf{Boundary data}: Time-varying values on the boundary of the spatial region
+\end{enumerate}
+
+\Cref{fig:spacetime-window} illustrates this concept. The extraction box (blue) defines a spatial subset of the full domain (gray). During simulation, we record the field values on the boundary of this box at every timestep, creating a complete ``boundary history'' that can later drive a reconstruction simulation.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.9,
+    every node/.style={font=\sffamily\small}
+]
+    % Full domain (3D box - back faces)
+    \fill[gray!15] (0,0) -- (8,0) -- (8,5) -- (0,5) -- cycle;
+    \draw[gray!60, line width=1pt] (0,0) rectangle (8,5);
+
+    % 3D effect - top face of full domain
+    \fill[gray!25] (0,5) -- (1.5,6.2) -- (9.5,6.2) -- (8,5) -- cycle;
+    \draw[gray!60, line width=1pt] (0,5) -- (1.5,6.2) -- (9.5,6.2) -- (8,5);
+
+    % 3D effect - right face of full domain
+    \fill[gray!20] (8,0) -- (9.5,1.2) -- (9.5,6.2) -- (8,5) -- cycle;
+    \draw[gray!60, line width=1pt] (8,0) -- (9.5,1.2) -- (9.5,6.2);
+
+    % Extraction box (smaller, inside) - front face
+    \fill[primarylight, opacity=0.7] (2,1) -- (6,1) -- (6,4) -- (2,4) -- cycle;
+    \draw[primaryblue, line width=2pt] (2,1) rectangle (6,4);
+
+    % 3D effect - top face of extraction box
+    \fill[primarylight, opacity=0.5] (2,4) -- (3,4.8) -- (7,4.8) -- (6,4) -- cycle;
+    \draw[primaryblue, line width=2pt] (2,4) -- (3,4.8) -- (7,4.8) -- (6,4);
+
+    % 3D effect - right face of extraction box
+    \fill[primarylight, opacity=0.4] (6,1) -- (7,1.8) -- (7,4.8) -- (6,4) -- cycle;
+    \draw[primaryblue, line width=2pt] (6,1) -- (7,1.8) -- (7,4.8);
+
+    % Boundary faces highlighted (thick lines showing the "boundary data" surface)
+    \draw[warningorange, line width=3pt, opacity=0.8] (2,1) -- (2,4);
+    \draw[warningorange, line width=3pt, opacity=0.8] (2,1) -- (6,1);
+    \draw[warningorange, line width=3pt, opacity=0.8] (2,4) -- (3,4.8);
+    \draw[warningorange, line width=3pt, opacity=0.8] (3,4.8) -- (7,4.8);
+
+    % Flow arrows (showing flow passing through)
+    \foreach \y in {1.5, 2.5, 3.5} {
+        \draw[->, secondarygreen, line width=1.5pt] (-0.5,\y) -- (1.8,\y);
+        \draw[->, secondarygreen, line width=1.5pt, dashed] (1.8,\y) -- (6.2,\y);
+        \draw[->, secondarygreen, line width=1.5pt] (6.2,\y) -- (8.5,{\y+0.3});
+    }
+
+    % Labels
+    \node[anchor=north west, fill=white, inner sep=2pt] at (0.1,4.9) {\textbf{Full Domain}};
+    \node[anchor=south, fill=white, inner sep=2pt, primarydark] at (4,0.8) {\textbf{Extraction Box}};
+    \node[anchor=west, warningorange] at (7.3,3.5) {\textbf{Boundary}};
+    \node[anchor=west, warningorange] at (7.3,3.0) {\textbf{Data}};
+
+    % Flow direction label
+    \node[secondarygreen, anchor=west] at (-0.5,0.5) {Flow};
+
+    % Dimensions annotation
+    \draw[<->, gray, line width=0.8pt] (2,-0.3) -- (6,-0.3);
+    \node[gray, anchor=north] at (4,-0.3) {$L_x$};
+\end{tikzpicture}
+\caption{Space-time window extraction: A bounding box (blue) defines the region of interest within the full computational domain (gray). Boundary data (orange) is recorded at every timestep as the flow passes through.}
+\label{fig:spacetime-window}
+\end{figure}
+
+\subsection{Extraction and Reconstruction Workflow}
+
+The workflow consists of two distinct phases that can be separated in time and computational resources, as shown in \cref{fig:extraction-reconstruction}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.85,
+    every node/.style={font=\sffamily\small},
+    phase/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=5.5cm,
+        minimum height=1.2cm,
+        text centered,
+        font=\sffamily\small,
+        drop shadow={shadow xshift=0.5pt, shadow yshift=-0.5pt, opacity=0.15}
+    },
+    data/.style={
+        cylinder,
+        shape border rotate=90,
+        draw,
+        minimum height=1cm,
+        minimum width=1.5cm,
+        aspect=0.25,
+        font=\sffamily\footnotesize
+    },
+    arrow/.style={->, line width=1.5pt}
+]
+    % === LEFT SIDE: EXTRACTION PHASE ===
+    \node[phase, fill=primarylight, draw=primaryblue, line width=1pt] (extract) at (0,4) {
+        \begin{tabular}{c}
+            \textbf{\color{primarydark}Extraction Phase}\\
+            \color{bodytext}HPC Cluster
+        \end{tabular}
+    };
+
+    % Full domain simulation
+    \node[phase, fill=gray!10, draw=gray!60, line width=0.8pt, minimum width=4.5cm] (fullsim) at (0,2) {
+        \begin{tabular}{c}
+            Full Domain LES\\
+            $10^7$--$10^9$ cells
+        \end{tabular}
+    };
+
+    % Extracted data
+    \node[data, fill=secondarylight, draw=secondarygreen] (initdata) at (-1.5,-0.5) {Initial};
+    \node[data, fill=warninglight, draw=warningorange] (bcdata) at (1.5,-0.5) {Boundary};
+
+    % Arrows from extraction
+    \draw[arrow, primaryblue] (extract) -- (fullsim);
+    \draw[arrow, secondarygreen] (fullsim.south) -- ++(0,-0.5) -| (initdata.north);
+    \draw[arrow, warningorange] (fullsim.south) -- ++(0,-0.5) -| (bcdata.north);
+
+    % Data labels
+    \node[anchor=north, secondarygreen, font=\sffamily\footnotesize] at (-1.5,-1.3) {$t_0$ fields};
+    \node[anchor=north, warningorange, font=\sffamily\footnotesize] at (1.5,-1.3) {$t_0 \to t_n$};
+
+    % === STORAGE/TRANSFER ===
+    \draw[dashed, gray, line width=1pt] (4,-2) -- (4,5.5);
+    \node[gray, rotate=90, anchor=south] at (4.3,2) {\textbf{Data Transfer / Archival}};
+
+    % === RIGHT SIDE: RECONSTRUCTION PHASE ===
+    \node[phase, fill=accentlight, draw=accentpurple, line width=1pt] (reconstruct) at (8,4) {
+        \begin{tabular}{c}
+            \textbf{\color{accentpurple}Reconstruction Phase}\\
+            \color{bodytext}Workstation / Small Cluster
+        \end{tabular}
+    };
+
+    % Subset simulation
+    \node[phase, fill=gray!10, draw=gray!60, line width=0.8pt, minimum width=4.5cm] (subsetsim) at (8,2) {
+        \begin{tabular}{c}
+            Subset Domain\\
+            $10^4$--$10^6$ cells
+        \end{tabular}
+    };
+
+    % Input data to reconstruction
+    \node[data, fill=secondarylight, draw=secondarygreen] (initdata2) at (6.5,-0.5) {Initial};
+    \node[data, fill=warninglight, draw=warningorange] (bcdata2) at (9.5,-0.5) {Boundary};
+
+    % Results
+    \node[phase, fill=secondarylight, draw=secondarygreen, line width=1pt, minimum width=4.5cm, minimum height=0.8cm] (results) at (8,-2.5) {
+        \textbf{\color{secondarygreen}Reconstructed Flow Field}
+    };
+
+    % Arrows for reconstruction
+    \draw[arrow, secondarygreen] (initdata2.north) -- ++(0,0.5) -| ([xshift=-0.5cm]subsetsim.south);
+    \draw[arrow, warningorange] (bcdata2.north) -- ++(0,0.5) -| ([xshift=0.5cm]subsetsim.south);
+    \draw[arrow, accentpurple] (reconstruct) -- (subsetsim);
+    \draw[arrow, secondarygreen] (subsetsim.south) -- ++(0,-0.8) -- (results.north);
+
+    % Transfer arrows
+    \draw[arrow, gray, dashed] (initdata.east) -- ++(0.5,0) |- ([yshift=0.3cm]initdata2.west) -- (initdata2.west);
+    \draw[arrow, gray, dashed] (bcdata.east) -- ++(0.3,0) |- ([yshift=-0.3cm]bcdata2.west) -- (bcdata2.west);
+
+    % Time annotations
+    \draw[<->, gray] (-2.8,4.8) -- (-2.8,1.2);
+    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (-3.1,3) {Hours--Days};
+
+    \draw[<->, gray] (10.8,4.8) -- (10.8,1.2);
+    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (11.1,3) {Minutes--Hours};
+\end{tikzpicture}
+\caption{Two-phase workflow: The extraction phase runs on HPC resources and produces compact data files. The reconstruction phase can run on modest hardware, reproducing the flow in the region of interest.}
+\label{fig:extraction-reconstruction}
+\end{figure}
+
+\subsubsection{Extraction Phase (HPC)}
+
+During the original simulation on high-performance computing resources:
+
+\begin{enumerate}
+    \item The \texttt{spaceTimeWindowExtract} function object monitors the simulation
+    \item At the start time ($t_0$), it extracts the complete field state within the bounding box
+    \item At every timestep, it interpolates field values to the boundary faces and stores them
+    \item The output is a compact dataset: initial conditions + time-varying boundary data
+\end{enumerate}
+
+\subsubsection{Reconstruction Phase (Offline)}
+
+Later, on more modest computational resources:
+
+\begin{enumerate}
+    \item The \texttt{spaceTimeWindowInitCase} utility creates a complete simulation case
+    \item The subset mesh is extracted from the original
+    \item Boundary conditions are configured to read the stored boundary data
+    \item The solver runs, reproducing the flow within the extraction box
+\end{enumerate}
+
+\begin{tipbox}
+The reconstruction phase typically requires 100--10,000$\times$ fewer computational resources than the original simulation, making it feasible to run on a workstation or laptop.
+\end{tipbox}
+
+\subsection{Parallel Execution with MPI Domain Decomposition}
+\label{sec:concept-parallel}
+
+Large-scale CFD simulations invariably run in parallel using MPI (Message Passing Interface). The computational domain is divided among multiple processors, each handling a subset of the mesh. The spaceTimeWindow library handles both serial and parallel execution transparently.
+
+\Cref{fig:domain-decomposition} illustrates how domain decomposition affects the extraction process. The extraction box may span multiple processor domains, requiring coordination to gather boundary data from all relevant processors.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.8,
+    every node/.style={font=\sffamily\small}
+]
+    % === FULL DOMAIN WITH DECOMPOSITION ===
+    % Background grid showing processor domains
+    \fill[gray!10] (0,0) rectangle (12,8);
+
+    % Processor domains (4x2 = 8 processors)
+    \foreach \i in {0,1,2,3} {
+        \foreach \j in {0,1} {
+            \pgfmathtruncatemacro{\procnum}{\i + 4*\j}
+            \draw[gray!40, line width=0.5pt] ({\i*3},{\j*4}) rectangle ({(\i+1)*3},{(\j+1)*4});
+            \node[gray!60, font=\sffamily\tiny] at ({\i*3+0.4},{\j*4+0.4}) {P\procnum};
+        }
+    }
+
+    % Domain outline
+    \draw[gray!70, line width=1.5pt] (0,0) rectangle (12,8);
+
+    % Extraction box spanning multiple processors
+    \fill[primarylight, opacity=0.6] (4,2.5) rectangle (10,6.5);
+    \draw[primaryblue, line width=2.5pt] (4,2.5) rectangle (10,6.5);
+
+    % Highlight the processor boundaries that intersect extraction box
+    \draw[accentpurple, line width=1.5pt, dashed] (6,2.5) -- (6,6.5);
+    \draw[accentpurple, line width=1.5pt, dashed] (9,2.5) -- (9,6.5);
+    \draw[accentpurple, line width=1.5pt, dashed] (4,4) -- (10,4);
+
+    % Labels for processors involved
+    \node[fill=white, inner sep=2pt, font=\sffamily\footnotesize] at (5,3.2) {P1};
+    \node[fill=white, inner sep=2pt, font=\sffamily\footnotesize] at (7.5,3.2) {P2};
+    \node[fill=white, inner sep=2pt, font=\sffamily\footnotesize] at (5,5.2) {P5};
+    \node[fill=white, inner sep=2pt, font=\sffamily\footnotesize] at (7.5,5.2) {P6};
+
+    % Arrows showing data flow to master
+    \draw[->, line width=1pt, warningorange] (5,3.2) -- (5,1) -- (0.5,1) -- (0.5,-1);
+    \draw[->, line width=1pt, warningorange] (7.5,3.2) -- (7.5,0.5) -- (0.5,0.5) -- (0.5,-1);
+    \draw[->, line width=1pt, warningorange] (5,5.2) -- (5,7.5) -- (0.5,7.5) -- (0.5,-1);
+    \draw[->, line width=1pt, warningorange] (7.5,5.2) -- (7.5,8) -- (0.3,8) -- (0.3,-1);
+
+    % Master processor collecting data
+    \node[rectangle, rounded corners=3pt, fill=secondarylight, draw=secondarygreen, line width=1pt, minimum width=2.5cm, minimum height=1cm] (master) at (0.5,-2) {
+        \begin{tabular}{c}
+            \footnotesize Master (P0)\\
+            \footnotesize gathers data
+        \end{tabular}
+    };
+
+    % Output file
+    \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight, minimum height=0.8cm, minimum width=1.2cm, aspect=0.3] (file) at (0.5,-4) {};
+    \node[font=\sffamily\tiny, warningorange] at (0.5,-4) {U.dvz};
+
+    \draw[->, line width=1.5pt, secondarygreen] (master) -- (file);
+
+    % Legend
+    \node[anchor=north west] at (12.5,8) {\textbf{Legend:}};
+    \draw[primaryblue, line width=2pt] (12.5,7.2) -- (13.5,7.2);
+    \node[anchor=west, font=\sffamily\footnotesize] at (13.7,7.2) {Extraction box};
+    \draw[accentpurple, line width=1pt, dashed] (12.5,6.5) -- (13.5,6.5);
+    \node[anchor=west, font=\sffamily\footnotesize] at (13.7,6.5) {Processor boundaries};
+    \draw[->, warningorange, line width=1pt] (12.5,5.8) -- (13.5,5.8);
+    \node[anchor=west, font=\sffamily\footnotesize] at (13.7,5.8) {Data gathering};
+
+    % Title
+    \node[anchor=south, font=\sffamily\bfseries, primarydark] at (6,8.3) {Parallel Extraction: Domain Decomposition with 8 MPI Processes};
+\end{tikzpicture}
+\caption{Domain decomposition in parallel simulations. The extraction box (blue) spans multiple processor domains. Each processor extracts its local contribution, and data is gathered to the master process for writing unified boundary data files.}
+\label{fig:domain-decomposition}
+\end{figure}
+
+\subsubsection{How Parallel Extraction Works}
+
+In parallel mode, the extraction process operates as follows:
+
+\begin{enumerate}
+    \item \textbf{Local identification}: Each processor identifies which of its cells fall within the extraction bounding box
+    \item \textbf{Local extraction}: Each processor extracts field values for its local portion of the boundary
+    \item \textbf{Global gathering}: Boundary data is gathered to the master processor using MPI collective operations
+    \item \textbf{Unified output}: The master processor writes a single, consolidated boundary data file for each timestep
+\end{enumerate}
+
+\Cref{fig:mpi-gathering} shows the detailed data flow during the extraction process. The \texttt{spaceTimeWindowExtract} function object runs on each MPI process, extracting local contributions that are then gathered and merged into unified output files.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.75,
+    every node/.style={font=\sffamily\small},
+    procbox/.style={
+        rectangle,
+        rounded corners=3pt,
+        minimum width=2.8cm,
+        minimum height=2.2cm,
+        draw,
+        line width=1pt
+    },
+    databox/.style={
+        rectangle,
+        rounded corners=2pt,
+        minimum width=2cm,
+        minimum height=0.5cm,
+        draw,
+        font=\sffamily\tiny
+    },
+    arrow/.style={->, line width=1pt}
+]
+    % Title
+    \node[anchor=south, font=\sffamily\bfseries\large, primarydark] at (7,9) {MPI Data Gathering by spaceTimeWindowExtract};
+
+    % === PROCESSOR BOXES (showing what each does) ===
+
+    % P0 (Master)
+    \node[procbox, fill=secondarylight, draw=secondarygreen] (p0) at (0,6) {};
+    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (0,7) {P0 (Master)};
+    \node[databox, fill=white, draw=primaryblue] at (0,6.3) {Local faces: 127};
+    \node[databox, fill=white, draw=warningorange] at (0,5.5) {U values};
+    \node[font=\sffamily\tiny, gray] at (0,4.9) {+ gathering};
+
+    % P1
+    \node[procbox, fill=primarylight, draw=primaryblue] (p1) at (4,6) {};
+    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (4,7) {P1};
+    \node[databox, fill=white, draw=primaryblue] at (4,6.3) {Local faces: 89};
+    \node[databox, fill=white, draw=warningorange] at (4,5.5) {U values};
+
+    % P2
+    \node[procbox, fill=primarylight, draw=primaryblue] (p2) at (8,6) {};
+    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (8,7) {P2};
+    \node[databox, fill=white, draw=primaryblue] at (8,6.3) {Local faces: 156};
+    \node[databox, fill=white, draw=warningorange] at (8,5.5) {U values};
+
+    % P3
+    \node[procbox, fill=primarylight, draw=primaryblue] (p3) at (12,6) {};
+    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (12,7) {P3};
+    \node[databox, fill=white, draw=primaryblue] at (12,6.3) {Local faces: 0};
+    \node[font=\sffamily\tiny, gray] at (12,5.5) {(outside box)};
+
+    % Dots for more processors
+    \node[font=\sffamily\large, gray] at (15,6) {...};
+    \node[font=\sffamily\tiny, gray] at (15,5.3) {P4--P$_{n-1}$};
+
+    % === MPI GATHER ARROWS ===
+    \draw[arrow, warningorange, line width=1.5pt] (p1.south) -- ++(0,-0.8) -| (2,-0.5);
+    \draw[arrow, warningorange, line width=1.5pt] (p2.south) -- ++(0,-1.2) -| (2,-0.5);
+    \draw[arrow, warningorange, line width=1.5pt] (p3.south) -- ++(0,-1.6) -| (2,-0.5);
+    \draw[arrow, secondarygreen, line width=1.5pt] (p0.south) -- (0,3);
+
+    % === MPI COLLECTIVE OPERATION BOX ===
+    \node[rectangle, rounded corners=4pt, fill=accentlight, draw=accentpurple, line width=1.5pt,
+          minimum width=10cm, minimum height=1.2cm] (mpi) at (6,3) {};
+    \node[font=\sffamily\bfseries, accentpurple] at (6,3) {MPI\_Gatherv: Collect variable-length data from all ranks};
+
+    % === MERGED OUTPUT ===
+    \node[rectangle, rounded corners=4pt, fill=secondarylight, draw=secondarygreen, line width=1.5pt,
+          minimum width=5cm, minimum height=1.8cm] (merged) at (2,0.5) {};
+    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (2,1.3) {Merged Global Data};
+    \node[databox, fill=white, draw=primaryblue] at (2,0.6) {Total faces: 372};
+    \node[databox, fill=white, draw=warningorange] at (2,-0.1) {U[0..371]};
+
+    % Arrow from MPI to merged
+    \draw[arrow, accentpurple, line width=1.5pt] (6,2.3) -- (6,1.8) -| (2,1.4);
+
+    % === OUTPUT FILE ===
+    \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight,
+          minimum height=1.2cm, minimum width=2cm, aspect=0.25, line width=1.5pt] (file) at (10,0.5) {};
+    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {0.001/U.dvz};
+
+    % Arrow from merged to file
+    \draw[arrow, secondarygreen, line width=2pt] (4.5,0.5) -- node[above, font=\sffamily\footnotesize] {write} (8,0.5);
+
+    % === ANNOTATION: What happens each timestep ===
+    \draw[decorate, decoration={brace, amplitude=8pt, mirror}, gray, line width=1pt]
+        (-1.5,4.5) -- (-1.5,8);
+    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (-2.2,6.25) {Each timestep};
+
+    % === FACE INTERPOLATION NOTE ===
+    \node[rectangle, rounded corners=3pt, fill=codebg, draw=codeframe,
+          text width=4.5cm, font=\sffamily\tiny, align=left, inner sep=4pt] at (13,-0.5) {
+        \textbf{Face interpolation:}\\
+        Cell values $\rightarrow$ face centers\\
+        using linear interpolation\\
+        \texttt{volPointInterpolation}
+    };
+\end{tikzpicture}
+\caption{Detailed MPI data gathering during parallel extraction. Each processor runs the \texttt{spaceTimeWindowExtract} function object, which identifies local boundary faces, interpolates field values to face centers, and participates in a collective gather operation. The master processor (P0) writes the merged data to a single file per timestep.}
+\label{fig:mpi-gathering}
+\end{figure}
+
+This approach ensures that:
+\begin{itemize}
+    \item The reconstruction case is \textbf{decomposition-independent}---the same boundary data works regardless of how the original simulation was parallelized
+    \item Output files are compact and self-contained, with no processor-specific information
+    \item The reconstruction can run in serial or with a different parallel decomposition
+\end{itemize}
+
+\begin{notebox}
+In parallel mode, mesh information is not written during extraction. Instead, the extraction box parameters are stored, and \texttt{spaceTimeWindowInitCase} creates the subset mesh from reconstructed fields. Run \texttt{reconstructPar -time <startTime>} on the source case before initializing the reconstruction case.
+\end{notebox}
+
+\subsection{Data Storage: Initial Fields and Boundary Data}
+\label{sec:concept-storage}
+
+The extracted data consists of two distinct components, illustrated in \cref{fig:data-storage}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.85,
+    every node/.style={font=\sffamily\small},
+    file/.style={
+        rectangle,
+        rounded corners=2pt,
+        minimum width=2cm,
+        minimum height=0.6cm,
+        draw,
+        font=\sffamily\footnotesize
+    },
+    folder/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=3cm,
+        minimum height=0.8cm,
+        draw,
+        line width=1pt,
+        font=\sffamily\small\bfseries
+    }
+]
+    % === TIME AXIS ===
+    \draw[->, line width=1.5pt, gray] (0,0) -- (14,0);
+    \node[gray, anchor=west] at (14,0) {Time};
+
+    % Time markers
+    \foreach \t/\label in {1/$t_0$, 3/$t_1$, 5/$t_2$, 7/$t_3$, 9/\ldots, 11/$t_{n-1}$, 13/$t_n$} {
+        \draw[gray, line width=1pt] (\t,-0.15) -- (\t,0.15);
+        \node[gray, anchor=north, font=\sffamily\footnotesize] at (\t,-0.2) {\label};
+    }
+
+    % === INITIAL FIELDS (t_0 only) ===
+    \node[folder, fill=secondarylight, draw=secondarygreen] (initfolder) at (1,2.5) {Initial Fields};
+
+    % Initial field files
+    \node[file, fill=white, draw=secondarygreen] at (1,1.7) {U, p, nut, ...};
+
+    % Arrow from t_0 to initial fields
+    \draw[->, secondarygreen, line width=1.5pt] (1,0.3) -- (1,1.3);
+
+    % Brace for "written once"
+    \draw[decorate, decoration={brace, amplitude=5pt, mirror}, secondarygreen, line width=1pt]
+        (0.2,1.3) -- (0.2,2.9);
+    \node[secondarygreen, anchor=east, font=\sffamily\footnotesize, align=right] at (0,2.1) {Written\\once};
+
+    % === BOUNDARY DATA (every timestep) ===
+    \node[folder, fill=warninglight, draw=warningorange] (bcfolder) at (7,2.5) {Boundary Data};
+
+    % Boundary data files for each timestep
+    \foreach \x in {3, 5, 7, 9, 11} {
+        \node[file, fill=white, draw=warningorange, minimum width=1cm, font=\sffamily\tiny] at (\x,1.7) {U};
+    }
+    \node[font=\sffamily\tiny, gray] at (9,1.7) {...};
+
+    % Arrows from timesteps to boundary data
+    \foreach \x in {3,5,7,9,11} {
+        \draw[->, warningorange, line width=1pt] (\x,0.3) -- (\x,1.3);
+    }
+
+    % Brace for "written every timestep"
+    \draw[decorate, decoration={brace, amplitude=5pt}, warningorange, line width=1pt]
+        (2.5,3) -- (11.5,3);
+    \node[warningorange, anchor=south, font=\sffamily\footnotesize] at (7,3.2) {Written every timestep};
+
+    % === STORAGE SIZE COMPARISON ===
+    \node[anchor=north west, font=\sffamily\bfseries] at (0,-1.5) {Storage Requirements:};
+
+    % Initial fields size
+    \fill[secondarygreen!30] (0,-2.5) rectangle (2,-2);
+    \draw[secondarygreen, line width=1pt] (0,-2.5) rectangle (2,-2);
+    \node[anchor=west, font=\sffamily\footnotesize] at (2.2,-2.25) {Initial fields: $\mathcal{O}(N_\text{cells})$};
+
+    % Boundary data size (larger bar)
+    \fill[warningorange!30] (0,-3.3) rectangle (10,-2.8);
+    \draw[warningorange, line width=1pt] (0,-3.3) rectangle (10,-2.8);
+    \node[anchor=west, font=\sffamily\footnotesize] at (10.2,-3.05) {Boundary data: $\mathcal{O}(N_\text{faces} \times N_\text{timesteps})$};
+
+    % Note about compression
+    \node[anchor=north west, font=\sffamily\footnotesize, text width=12cm, bodytext] at (0,-3.8) {
+        $\rightarrow$ Boundary data dominates storage. Use \texttt{dvzt} format for 30--50$\times$ compression.
+    };
+\end{tikzpicture}
+\caption{Data storage structure: Initial fields are written once at $t_0$, while boundary data is accumulated at every timestep. Compression is critical for the boundary data component.}
+\label{fig:data-storage}
+\end{figure}
+
+\subsubsection{Initial Fields}
+
+The initial fields provide the starting state for reconstruction:
+
+\begin{itemize}
+    \item \textbf{What}: Complete volumetric data (U, p, turbulence quantities) within the extraction box
+    \item \textbf{When}: Written once at the extraction start time ($t_0$)
+    \item \textbf{Format}: Standard OpenFOAM field format (ASCII)
+    \item \textbf{Size}: Proportional to number of cells in the subset, typically megabytes
+\end{itemize}
+
+\subsubsection{Boundary Data}
+
+The boundary data provides the time-varying boundary conditions:
+
+\begin{itemize}
+    \item \textbf{What}: Face-interpolated field values on the boundary of the extraction box
+    \item \textbf{When}: Written at every timestep throughout the simulation
+    \item \textbf{Format}: Configurable (ASCII, binary, or compressed \texttt{dvz}/\texttt{dvzt})
+    \item \textbf{Size}: Proportional to (number of boundary faces) $\times$ (number of timesteps)
+\end{itemize}
+
+\begin{warningbox}
+Boundary data accumulates rapidly during long simulations. For a typical LES with $10^4$ boundary faces and $10^4$ timesteps, uncompressed ASCII data can reach tens of gigabytes. The \texttt{dvzt} compression format reduces this by 30--50$\times$.
+\end{warningbox}
+
+\subsection{Why Reconstruction Works}
+\label{sec:concept-why}
+
+The reconstruction is possible because the governing equations (Navier-Stokes for incompressible flow) are well-posed with appropriate boundary conditions. Mathematically, if we denote:
+
+\begin{itemize}
+    \item $\Omega \subset \mathbb{R}^3$: the extraction box domain
+    \item $\partial\Omega$: the boundary of the extraction box
+    \item $\mathbf{u}(\mathbf{x}, t)$: the velocity field
+    \item $p(\mathbf{x}, t)$: the pressure field
+\end{itemize}
+
+Then knowing $\mathbf{u}(\mathbf{x}, t_0)$ for $\mathbf{x} \in \Omega$ (initial condition) and $\mathbf{u}(\mathbf{x}, t)$ for $\mathbf{x} \in \partial\Omega$, $t \in [t_0, t_n]$ (boundary data) is sufficient to uniquely determine $\mathbf{u}(\mathbf{x}, t)$ for all $\mathbf{x} \in \Omega$, $t \in [t_0, t_n]$.
+
+The reconstruction achieves ``bit-reproducible'' results when:
+\begin{enumerate}
+    \item Time interpolation is disabled (\texttt{timeInterpolationScheme none})
+    \item The reconstruction runs with the same timestep as extraction
+    \item The same solver settings and numerical schemes are used
+\end{enumerate}
+
+With time interpolation enabled (recommended for practical use), the reconstruction closely approximates the original solution, with errors controlled by the interpolation scheme (linear or cubic Catmull-Rom spline).
+
+\subsection{Automatic Boundary Condition Configuration}
+\label{sec:concept-auto-bc}
+
+A key feature of the spaceTimeWindow library is the \textbf{automatic configuration} of boundary conditions during offline reconstruction. When you run \texttt{spaceTimeWindowInitCase}, the utility analyzes the extracted data and configures appropriate boundary conditions for each field---no manual setup required.
+
+\Cref{fig:auto-bc-config} illustrates the automatic configuration process that occurs when setting up a reconstruction case on a laptop or desktop computer.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.8,
+    every node/.style={font=\sffamily\small},
+    box/.style={
+        rectangle,
+        rounded corners=4pt,
+        minimum width=3.5cm,
+        minimum height=1cm,
+        draw,
+        line width=1pt,
+        text centered
+    },
+    smallbox/.style={
+        rectangle,
+        rounded corners=2pt,
+        minimum width=2.5cm,
+        minimum height=0.6cm,
+        draw,
+        font=\sffamily\footnotesize
+    },
+    arrow/.style={->, line width=1.5pt}
+]
+    % Title
+    \node[anchor=south, font=\sffamily\bfseries\large, primarydark] at (7,10) {Automatic BC Configuration by spaceTimeWindowInitCase};
+
+    % === INPUT: Extracted Data ===
+    \node[box, fill=warninglight, draw=warningorange, minimum width=4cm] (input) at (0,8) {
+        \begin{tabular}{c}
+            \textbf{Extracted Data}\\
+            \footnotesize boundaryData/
+        \end{tabular}
+    };
+
+    % Files in boundaryData
+    \node[smallbox, fill=white, draw=warningorange] at (0,6.8) {U.dvz (velocity)};
+    \node[smallbox, fill=white, draw=gray!50] at (0,6.1) {points};
+    \node[smallbox, fill=white, draw=gray!50] at (0,5.4) {extractionMetadata};
+
+    % === ANALYSIS STEP ===
+    \node[box, fill=accentlight, draw=accentpurple, minimum width=5cm, minimum height=2.5cm] (analyze) at (7,7) {};
+    \node[anchor=north, font=\sffamily\bfseries, accentpurple] at (7,8.1) {spaceTimeWindowInitCase};
+
+    % Analysis steps inside
+    \node[anchor=north west, font=\sffamily\tiny, text width=4.5cm, align=left] at (4.7,7.7) {
+        1. Read extraction metadata\\
+        2. Detect available fields\\
+        3. Check mesh resolution\\
+        4. Determine BC types:\\
+        \quad - Vector + data $\rightarrow$ InletOutlet\\
+        \quad - Scalar + data $\rightarrow$ zeroGradient\\
+        \quad - No data $\rightarrow$ zeroGradient
+    };
+
+    % Arrow from input to analyze
+    \draw[arrow, warningorange] (2,7) -- (4.3,7);
+
+    % === OUTPUT: Configured Case ===
+    \node[box, fill=secondarylight, draw=secondarygreen, minimum width=4cm, minimum height=1.2cm] (output) at (14,8) {
+        \begin{tabular}{c}
+            \textbf{Configured Case}\\
+            \footnotesize Ready to run!
+        \end{tabular}
+    };
+
+    % Output files
+    \node[smallbox, fill=white, draw=secondarygreen] at (14,6.5) {0.0001/U};
+    \node[smallbox, fill=white, draw=secondarygreen] at (14,5.8) {0.0001/p};
+    \node[smallbox, fill=white, draw=secondarygreen] at (14,5.1) {0.0001/nut};
+    \node[smallbox, fill=white, draw=primaryblue] at (14,4.4) {system/controlDict};
+
+    % Arrow from analyze to output
+    \draw[arrow, secondarygreen] (9.7,7) -- (11.8,7);
+
+    % === BC DETAIL BOX ===
+    \node[rectangle, rounded corners=4pt, fill=codebg, draw=codeframe, line width=1pt,
+          text width=13cm, inner sep=8pt] (bcdetail) at (7,2) {
+        \begin{minipage}{\linewidth}
+        \centering\textbf{Automatic Boundary Condition Assignment (oldInternalFaces patch)}
+        \vspace{0.3em}
+
+        \begin{tabular}{@{}l@{\quad}l@{\quad}l@{}}
+        \textbf{Field} & \textbf{Condition} & \textbf{Assigned BC} \\[0.3em]
+        \textcolor{primaryblue}{U (velocity)} & Has boundaryData + \texttt{-inletOutletBC} & \texttt{spaceTimeWindowInletOutlet} \\
+        \textcolor{secondarygreen}{p (pressure)} & No boundaryData & \texttt{zeroGradient} \\
+        \textcolor{warningorange}{nut, k, $\omega$} & Scalar fields & \texttt{zeroGradient} \\
+        \end{tabular}
+        \end{minipage}
+    };
+
+    % Arrow from analyze to bcdetail
+    \draw[arrow, accentpurple] (7,5.6) -- (7,3.5);
+
+    % === USER COMPUTER CONTEXT ===
+    \draw[dashed, gray, line width=1pt, rounded corners=8pt] (-2.5,3.8) rectangle (16.5,10.5);
+    \node[fill=white, font=\sffamily\footnotesize, gray] at (7,10.5) {Laptop / Desktop Computer (Offline Reconstruction)};
+\end{tikzpicture}
+\caption{Automatic boundary condition configuration during case initialization. The \texttt{spaceTimeWindowInitCase} utility analyzes extracted data and automatically assigns appropriate boundary conditions based on field type and data availability.}
+\label{fig:auto-bc-config}
+\end{figure}
+
+\subsubsection{Resolution-Independent Reconstruction}
+
+The reconstruction can run at \textbf{different mesh resolutions} than the original extraction. This enables several important use cases:
+
+\begin{itemize}
+    \item \textbf{Coarser mesh}: Faster turnaround for exploratory analysis or debugging
+    \item \textbf{Finer mesh}: Higher resolution studies without re-running the expensive global simulation
+    \item \textbf{Same resolution}: Bit-reproducible reconstruction for validation
+\end{itemize}
+
+\Cref{fig:resolution-handling} shows how the \texttt{spaceTimeWindow} boundary condition automatically handles resolution differences at runtime.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.75,
+    every node/.style={font=\sffamily\small},
+    arrow/.style={->, line width=1.5pt}
+]
+    % === EXTRACTION MESH (SOURCE) ===
+    \node[anchor=south, font=\sffamily\bfseries, primarydark] at (2,7.5) {Extraction Mesh};
+    \node[font=\sffamily\footnotesize, gray] at (2,7) {(from HPC simulation)};
+
+    % Draw source mesh boundary (irregular faces)
+    \fill[primarylight, opacity=0.5] (0,2) rectangle (4,6);
+    \draw[primaryblue, line width=1.5pt] (0,2) -- (0,6);
+
+    % Source face points (irregular spacing)
+    \foreach \y in {2.3, 2.9, 3.4, 4.1, 4.6, 5.3, 5.8} {
+        \fill[primaryblue] (0,\y) circle (3pt);
+    }
+    \node[font=\sffamily\tiny, primaryblue, anchor=east] at (-0.2,4) {7 faces};
+
+    % Source data indicator
+    \node[rectangle, rounded corners=2pt, fill=warninglight, draw=warningorange,
+          font=\sffamily\tiny, inner sep=2pt] at (2,4) {U data stored};
+
+    % === ARROWS TO DIFFERENT RESOLUTIONS ===
+
+    % Arrow to coarser
+    \draw[arrow, gray, line width=1.5pt] (4.5,5.5) -- node[above, font=\sffamily\footnotesize, sloped] {coarsen} (7,6.5);
+
+    % Arrow to same
+    \draw[arrow, gray, line width=1.5pt] (4.5,4) -- node[above, font=\sffamily\footnotesize] {same} (7,4);
+
+    % Arrow to finer
+    \draw[arrow, gray, line width=1.5pt] (4.5,2.5) -- node[below, font=\sffamily\footnotesize, sloped] {refine} (7,1.5);
+
+    % === COARSER RECONSTRUCTION ===
+    \node[anchor=south, font=\sffamily\bfseries, secondarygreen] at (10,7.8) {Coarser};
+    \node[font=\sffamily\tiny, gray] at (10,7.4) {\texttt{-coarsenLevel 1}};
+
+    \fill[secondarylight, opacity=0.5] (8,5.5) rectangle (12,7);
+    \draw[secondarygreen, line width=1.5pt] (8,5.5) -- (8,7);
+
+    % Fewer target faces
+    \foreach \y in {5.8, 6.4} {
+        \fill[secondarygreen] (8,\y) circle (3pt);
+    }
+    \node[font=\sffamily\tiny, secondarygreen, anchor=west] at (8.3,6.1) {2 faces};
+
+    % Interpolation method
+    \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
+          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,5.2) {
+        Area-weighted\\averaging
+    };
+
+    % === SAME RESOLUTION ===
+    \node[anchor=south, font=\sffamily\bfseries, accentpurple] at (10,4.8) {Same Resolution};
+    \node[font=\sffamily\tiny, gray] at (10,4.4) {(default)};
+
+    \fill[accentlight, opacity=0.5] (8,2.5) rectangle (12,4);
+    \draw[accentpurple, line width=1.5pt] (8,2.5) -- (8,4);
+
+    % Same number of faces
+    \foreach \y in {2.65, 2.95, 3.2, 3.55, 3.8} {
+        \fill[accentpurple] (8,\y) circle (3pt);
+    }
+    \node[font=\sffamily\tiny, accentpurple, anchor=west] at (8.3,3.25) {7 faces};
+
+    % Direct mapping
+    \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
+          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,2.2) {
+        Direct 1:1\\mapping
+    };
+
+    % === FINER RECONSTRUCTION ===
+    \node[anchor=south, font=\sffamily\bfseries, warningorange] at (10,1.8) {Finer};
+    \node[font=\sffamily\tiny, gray] at (10,1.4) {\texttt{-refineLevel 1}};
+
+    \fill[warninglight, opacity=0.5] (8,-1) rectangle (12,1);
+    \draw[warningorange, line width=1.5pt] (8,-1) -- (8,1);
+
+    % More target faces
+    \foreach \y in {-0.85, -0.55, -0.25, 0.05, 0.35, 0.65, 0.85} {
+        \fill[warningorange] (8,\y) circle (2pt);
+    }
+    \foreach \y in {-0.7, -0.4, -0.1, 0.2, 0.5, 0.75} {
+        \fill[warningorange] (8,\y) circle (2pt);
+    }
+    \node[font=\sffamily\tiny, warningorange, anchor=west] at (8.3,0) {14 faces};
+
+    % Interpolation method
+    \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
+          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,-1.3) {
+        Barycentric\\(Delaunay triangulation)
+    };
+
+    % === RUNTIME NOTE ===
+    \node[rectangle, rounded corners=4pt, fill=primarylight, draw=primaryblue, line width=1pt,
+          text width=5.5cm, font=\sffamily\tiny, align=left, inner sep=6pt] at (15,3) {
+        \textbf{At runtime:}\\[0.3em]
+        The \texttt{spaceTimeWindow} BC\\
+        automatically detects resolution\\
+        mismatch and applies appropriate\\
+        spatial interpolation \textbf{on-the-fly}.\\[0.3em]
+        No preprocessing required!
+    };
+
+    % Arrows to runtime note
+    \draw[->, primaryblue, line width=1pt] (12.2,6.1) -- (12.8,4.5);
+    \draw[->, primaryblue, line width=1pt] (12.2,3.25) -- (12.8,3.25);
+    \draw[->, primaryblue, line width=1pt] (12.2,0) -- (12.8,2);
+\end{tikzpicture}
+\caption{Resolution-independent reconstruction: The \texttt{spaceTimeWindow} boundary condition automatically handles mesh resolution differences between extraction and reconstruction. Spatial interpolation is performed on-the-fly during the simulation.}
+\label{fig:resolution-handling}
+\end{figure}
+
+\subsubsection{Time Interpolation at Runtime}
+
+Similarly, the boundary condition handles \textbf{time interpolation} automatically when the reconstruction timestep differs from the extraction timestep (which is common with adaptive timestepping). \Cref{fig:time-interpolation} illustrates the temporal interpolation process.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.85,
+    every node/.style={font=\sffamily\small}
+]
+    % === TIME AXIS ===
+    \draw[->, line width=1.5pt, gray] (0,0) -- (15,0);
+    \node[gray, anchor=west] at (15,0) {Time};
+
+    % === EXTRACTION TIMESTEPS (stored data) ===
+    \node[font=\sffamily\bfseries, warningorange, anchor=south] at (7,4) {Stored Boundary Data (from extraction)};
+
+    \foreach \x/\label in {1/t_0, 4/t_1, 7/t_2, 10/t_3, 13/t_4} {
+        \draw[warningorange, line width=2pt] (\x,-0.3) -- (\x,3.5);
+        \fill[warningorange] (\x,3.5) circle (4pt);
+        \node[warningorange, anchor=south, font=\sffamily\footnotesize] at (\x,3.6) {$\label$};
+        \node[font=\sffamily\tiny, gray, anchor=north] at (\x,-0.4) {\x.0e-4};
+    }
+
+    % === RECONSTRUCTION QUERY TIME ===
+    \node[font=\sffamily\bfseries, accentpurple, anchor=south] at (8.5,2.2) {Reconstruction queries $t = 8.5\text{e-}4$};
+    \draw[accentpurple, line width=2pt, dashed] (8.5,-0.3) -- (8.5,2);
+    \fill[accentpurple] (8.5,2) circle (5pt);
+
+    % === INTERPOLATION SCHEMES ===
+
+    % Linear interpolation
+    \node[rectangle, rounded corners=3pt, fill=primarylight, draw=primaryblue, line width=1pt,
+          minimum width=4cm, minimum height=1.5cm] (linear) at (3,-2.5) {};
+    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (3,-1.8) {Linear};
+    \node[font=\sffamily\tiny, text width=3.5cm, align=center] at (3,-2.8) {
+        Uses $t_2$, $t_3$\\
+        $U(t) = (1-\alpha)U_2 + \alpha U_3$
+    };
+
+    % Cubic interpolation
+    \node[rectangle, rounded corners=3pt, fill=secondarylight, draw=secondarygreen, line width=1pt,
+          minimum width=4cm, minimum height=1.5cm] (cubic) at (8.5,-2.5) {};
+    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (8.5,-1.8) {Cubic (Catmull-Rom)};
+    \node[font=\sffamily\tiny, text width=3.5cm, align=center] at (8.5,-2.8) {
+        Uses $t_1$, $t_2$, $t_3$, $t_4$\\
+        Smooth C$^1$ continuous
+    };
+
+    % Exact matching
+    \node[rectangle, rounded corners=3pt, fill=accentlight, draw=accentpurple, line width=1pt,
+          minimum width=4cm, minimum height=1.5cm] (exact) at (14,-2.5) {};
+    \node[anchor=north, font=\sffamily\bfseries, accentpurple] at (14,-1.8) {None (Exact)};
+    \node[font=\sffamily\tiny, text width=3.5cm, align=center] at (14,-2.8) {
+        Requires exact match\\
+        Bit-reproducible
+    };
+
+    % Arrows showing which timesteps are used
+    \draw[->, primaryblue, line width=1pt] (7,3.3) -- (3,-1.5);
+    \draw[->, primaryblue, line width=1pt] (10,3.3) -- (3.5,-1.5);
+
+    \draw[->, secondarygreen, line width=1pt] (4,3.3) -- (7,-1.5);
+    \draw[->, secondarygreen, line width=1pt] (7,3.3) -- (8,-1.5);
+    \draw[->, secondarygreen, line width=1pt] (10,3.3) -- (9,-1.5);
+    \draw[->, secondarygreen, line width=1pt] (13,3.3) -- (10,-1.5);
+
+    % Brace showing buffer requirement
+    \draw[decorate, decoration={brace, amplitude=5pt}, gray, line width=1pt]
+        (4,4.2) -- (13,4.2);
+    \node[gray, anchor=south, font=\sffamily\tiny] at (8.5,4.4) {Cubic requires 2 buffer timesteps at each end};
+\end{tikzpicture}
+\caption{Time interpolation during reconstruction. When the solver requests field values at times not exactly matching stored timesteps, the boundary condition interpolates using linear (2 points) or cubic Catmull-Rom (4 points) schemes. Cubic interpolation provides smooth derivatives, essential for adaptive timestepping.}
+\label{fig:time-interpolation}
+\end{figure}
+
+\begin{tipbox}
+The combination of automatic spatial and temporal interpolation means you can:
+\begin{itemize}
+    \item Run reconstruction on a laptop with a coarser mesh for quick visualization
+    \item Use adaptive timestepping (\texttt{adjustTimeStep yes}) without worrying about timestep alignment
+    \item Later refine the mesh for detailed analysis without re-extracting data
+\end{itemize}
+All interpolation happens transparently at runtime---no preprocessing steps required.
+\end{tipbox}
 
 % ----------------------------------------------------------------------------
 % ENCRYPTION

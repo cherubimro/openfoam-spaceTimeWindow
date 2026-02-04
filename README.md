@@ -780,7 +780,7 @@ Anton, A.-A. (2011). *"Space-Time Window Reconstruction in Parallel High Perform
 }
 ```
 
-Or acknowledge: "This work made use of openfoam-spaceTimeWindow https://dev.cs.upt.ro/alin.anton/openfoam-spaceTimeWindow"
+Or acknowledge: "This work made use of openfoam-spaceTimeWindow https://dev.cs.upt.ro/alin.anton/openfoam-spaceTimeWindow|https://github.com/cherubimro/openfoam-spaceTimeWindow"
 
 **Additional references:**
 - Lyn, D.A., Einav, S., Rodi, W., Park, J.-H. (1995). *"A laser-Doppler velocimetry study of ensemble-averaged characteristics of the turbulent near wake of a square cylinder"*, J. Fluid Mech. 304, 285-319

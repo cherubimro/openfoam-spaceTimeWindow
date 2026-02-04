@@ -488,7 +488,7 @@ export FOAM_USE_SODIUM=1 && ./Allwmake
 # Generate key pair
 spaceTimeWindowKeygen
 # Public key:  fqzYQ0U8j27tFEr5WzEMylbvXYP+9CAyk0JhwwZ2rwg=
-# Private key: QgzxB5b+DGPQH8exbWDe18n4Kv0nu5gqljI2RPBCwl4=
+# Private key: ************H8exb*****n4Kv0nu5gqljI2RPBCwl4=
 
 # Extraction with public key
 # Add to function object: publicKey "fqzYQ0U8j27tFEr5WzEMylbvXYP+9CAyk0JhwwZ2rwg=";

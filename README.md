@@ -12,31 +12,90 @@ This library provides three components for extracting a spatial subset from a fu
 
 1. **spaceTimeWindowExtract** - Function object to extract boundary data during the original simulation
 2. **spaceTimeWindowInitCase** - Utility to initialize a reconstruction case from extracted data
-3. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
+3. **spaceTimeWindowCoupledPressure** - **Recommended** pressure BC that blends Dirichlet/Neumann based on flux direction
+4. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
 
 ## Key Concepts
 
 ### Boundary Condition Approaches
 
-The library provides two approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
+The library provides three approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
 
-#### 1. Inlet-Outlet BC (`-inletOutletBC`) - **Recommended for Unsteady Flows**
+#### 1. Pressure-Coupled BC - **RECOMMENDED**
+
+Uses `spaceTimeWindowCoupledPressure` BC for pressure and `spaceTimeWindow` for velocity. This is the **recommended approach** because it properly handles the elliptic nature of the pressure equation.
+
+**Why pressure coupling is essential:**
+
+Unlike velocity (which is advected and hyperbolic), pressure is governed by an **elliptic equation**. Cutting the domain artificially severs the pressure influence from outside the extraction window. Simply prescribing Dirichlet (extracted pressure values) or Neumann (zero gradient) conditions can lead to:
+- Pressure drift over time
+- Incorrect pressure gradients at the boundary
+- Mass conservation issues
+- Different flow behavior than the source simulation
+
+The `spaceTimeWindowCoupledPressure` BC solves this by **blending Dirichlet and Neumann conditions** based on local flux direction:
+- **At inflow faces**: More weight towards Dirichlet (pressure enters from outside)
+- **At outflow faces**: More weight towards Neumann (pressure from interior dominates)
+
+**Extraction configuration:**
+```cpp
+extractSubset
+{
+    type            spaceTimeWindowExtract;
+    libs            (spaceTimeWindow);
+    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
+    outputDir       "../subset";
+    fields          (U p);
+    initialFields   (U p nut);
+
+    // Enable gradient extraction for pressure coupling
+    extractGradients    true;
+    gradientFields      (p);    // Extract normal gradient of pressure
+
+    writeFormat     deltaVarint;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+```
+
+**Reconstruction boundary conditions:**
+```cpp
+// In 0/p
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    phi             phi;
+    dirichletWeight 0.8;    // Weight at inflow (0-1)
+    neumannWeight   0.8;    // Weight at outflow (0-1)
+    transitionWidth 0.1;    // Smooth transition width
+    timeInterpolationScheme cubic;
+    value           uniform 0;
+}
+
+// In 0/U
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    timeInterpolationScheme cubic;
+    value           uniform (0 0 0);
+}
+```
+
+#### 2. Inlet-Outlet BC (`-inletOutletBC`) - For Quick Tests
 
 Uses `spaceTimeWindowInletOutlet` BC which applies:
 - **Velocity (U)**: Flux-based switching - Dirichlet (prescribed value) at inflow faces, zeroGradient at outflow faces
 - **All scalar fields (p, nut, k, epsilon, omega)**: zeroGradient
 
-This approach is **physically correct** for unsteady turbulent flows because:
-- Turbulent flows have instantaneous velocity fluctuations that can reverse direction locally
-- Vortex shedding, recirculation zones, and turbulent eddies cause portions of the boundary to alternate between inflow and outflow
-- Prescribing fixed values at outflow faces is non-physical (information should leave the domain freely)
-- The flux-based switching automatically adapts to the instantaneous flow direction at each face
+This approach is simpler but **may produce different flow behavior** than the source simulation because pressure is not coupled to the exterior. Use for quick tests or when exact reproduction is not required.
 
 ```bash
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 ```
 
-#### 2. Fixed Outlet Direction (`-outletDirection`) - For Steady-Mean Flows
+#### 3. Fixed Outlet Direction (`-outletDirection`) - For Steady-Mean Flows
 
 Creates a separate `outlet` patch from faces at one edge of the extraction box:
 - **oldInternalFaces**: Pure Dirichlet BC (spaceTimeWindow) on all remaining faces
@@ -48,7 +107,7 @@ Use when the mean flow direction is well-defined and outflow always occurs at a 
 spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 ```
 
-**Note:** These options are mutually exclusive. Using both together produces an error with guidance.
+**Note:** Options 2 and 3 are mutually exclusive. Using both together produces an error with guidance.
 
 ### Initial Fields vs Boundary Data Fields
 
@@ -268,9 +327,77 @@ For each field in the initial time directory:
 
 This ensures fields without time-varying data automatically get appropriate BCs.
 
-### spaceTimeWindowInletOutlet (Boundary Condition) - **Recommended**
+### spaceTimeWindowCoupledPressure (Boundary Condition) - **RECOMMENDED for Pressure**
 
-Flux-based boundary condition that reads pre-computed velocity values and applies them only at inflow faces.
+Mixed boundary condition that blends Dirichlet (extracted pressure) and Neumann (extracted gradient) based on local flux direction. This is the **recommended approach** for pressure because it properly handles the elliptic nature of the pressure equation.
+
+```cpp
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    phi             phi;                        // Flux field name
+    dirichletWeight 0.8;                        // Weight at inflow (0-1)
+    neumannWeight   0.8;                        // Weight at outflow (0-1)
+    transitionWidth 0.1;                        // Smooth transition width
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;              // or "linear" or "none"
+    value           uniform 0;
+}
+```
+
+**How it works:**
+
+The BC implements a mixed (Robin) condition that adapts to local flow direction:
+
+1. At each timestep, reads both pressure values (`p`) and normal gradients (`gradp`) from boundaryData
+2. Computes blending weight `w` for each face based on flux direction using a smooth tanh transition
+3. Applies: `p_face = w * p_Dirichlet + (1-w) * (p_cell + gradp_Neumann * d)`
+
+Where:
+- At inflow faces (phi < 0): `w -> dirichletWeight` (pressure enters from outside)
+- At outflow faces (phi > 0): `w -> 1 - neumannWeight` (pressure from interior dominates)
+
+**Mathematical formulation:**
+
+The blending weight uses a smooth hyperbolic tangent transition:
+```
+transition = tanh(phi_normalized / transitionWidth)
+w = 0.5 * ((w_dir + w_neu) - (w_dir - w_neu) * transition)
+```
+
+This ensures C∞ continuity at the transition, avoiding numerical artifacts.
+
+**Properties:**
+
+| Property       | Description                                    | Required | Default              |
+|----------------|------------------------------------------------|----------|----------------------|
+| dataDir        | Path to boundaryData directory                 | no       | constant/boundaryData |
+| phi            | Name of flux field                             | no       | phi                  |
+| dirichletWeight | Weight towards Dirichlet at inflow faces (0-1) | no      | 0.8                  |
+| neumannWeight  | Weight towards Neumann at outflow faces (0-1)  | no       | 0.8                  |
+| transitionWidth | Normalized flux width for smooth transition   | no       | 0.1                  |
+| pressureField  | Name of pressure data file in boundaryData     | no       | p                    |
+| gradientField  | Name of gradient data file in boundaryData     | no       | gradp                |
+| allowTimeInterpolation | Permit interpolation for missing timesteps | no | true |
+| timeInterpolationScheme | `none`, `linear`, or `cubic`            | no       | cubic                |
+
+**Extraction requirements:**
+
+To use this BC, extraction must include gradient data:
+```cpp
+extractSubset
+{
+    // ... other settings ...
+    fields              (U p);
+    extractGradients    true;
+    gradientFields      (p);    // Extracts "gradp" (normal gradient)
+}
+```
+
+### spaceTimeWindowInletOutlet (Boundary Condition)
+
+Flux-based boundary condition that reads pre-computed velocity values and applies them only at inflow faces. Use for velocity when using the pressure-coupled approach, or for quick tests.
 
 ```cpp
 oldInternalFaces

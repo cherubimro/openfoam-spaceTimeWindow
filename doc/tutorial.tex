@@ -1610,9 +1610,59 @@ For critical simulations, archive the encrypted reconstruction case to WORM stor
 \section{Boundary Condition Approaches}
 \label{sec:bc-approaches}
 
-The library provides two approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}):
+The library provides three approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}):
 
-\subsection{Inlet-Outlet BC (\texttt{-inletOutletBC}) --- Recommended for Unsteady Flows}
+\subsection{Pressure-Coupled BC --- Recommended}
+\label{sec:pressure-coupled-bc}
+
+The \textbf{recommended approach} for accurate reconstruction uses the \texttt{spaceTimeWindowCoupledPressure} boundary condition for pressure, which properly handles the elliptic nature of the pressure equation.
+
+\begin{itemize}
+    \item \textbf{Velocity (U)}: \texttt{spaceTimeWindow} --- pure Dirichlet from extracted data
+    \item \textbf{Pressure (p)}: \texttt{spaceTimeWindowCoupledPressure} --- mixed Dirichlet/Neumann based on flux direction
+    \item \textbf{Turbulence fields}: \texttt{zeroGradient}
+\end{itemize}
+
+\textbf{Why this approach is physically correct:}
+\begin{itemize}
+    \item Pressure is governed by an elliptic Poisson equation --- cutting the domain severs the pressure's ability to ``feel'' the flow outside the window
+    \item At \textbf{inflow faces}, pressure from outside dominates and is prescribed (Dirichlet)
+    \item At \textbf{outflow faces}, pressure should adjust freely so only the gradient is prescribed (Neumann)
+    \item The BC uses smooth tanh-based blending to transition between these limits
+    \item This \textbf{reproduces the original flow} rather than computing a different solution
+\end{itemize}
+
+\begin{lstlisting}[language=OpenFOAM,caption={Pressure-coupled boundary conditions}]
+// In 0/U
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform (0 0 0);
+}
+
+// In 0/p
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    phi             phi;
+    dirichletWeight 0.8;      // Strength at inflow (0-1)
+    neumannWeight   0.8;      // Strength at outflow (0-1)
+    transitionWidth 0.1;      // Blending sharpness
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform 0;
+}
+\end{lstlisting}
+
+\begin{notebox}
+The pressure-coupled approach requires extracting pressure gradients during extraction. Enable this with \texttt{extractGradients true} and \texttt{gradientFields (p)} in the extraction configuration. See \cref{sec:config-extract} for details.
+\end{notebox}
+
+\subsection{Inlet-Outlet BC (\texttt{-inletOutletBC}) --- For Quick Tests}
 \label{sec:inlet-outlet-bc}
 
 Uses \texttt{spaceTimeWindowInletOutlet} BC which applies:
@@ -1621,17 +1671,20 @@ Uses \texttt{spaceTimeWindowInletOutlet} BC which applies:
     \item \textbf{All scalar fields (p, nut, k, epsilon, omega)}: zeroGradient
 \end{itemize}
 
-This approach is \textbf{physically correct} for unsteady turbulent flows because:
+This approach is useful for quick tests and situations where exact reproduction of the original flow is not required:
 \begin{itemize}
     \item Turbulent flows have instantaneous velocity fluctuations that can reverse direction locally
-    \item Vortex shedding, recirculation zones, and turbulent eddies cause portions of the boundary to alternate between inflow and outflow
-    \item Prescribing fixed values at outflow faces is non-physical (information should leave the domain freely)
     \item The flux-based switching automatically adapts to the instantaneous flow direction at each face
+    \item However, pressure uses \texttt{zeroGradient}, which can lead to solution drift over time
 \end{itemize}
 
 \begin{lstlisting}[language=bash,caption={Using inlet-outlet BC}]
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 \end{lstlisting}
+
+\begin{warningbox}
+The inlet-outlet BC does not reproduce the original pressure field. The subset simulation will evolve to a \textbf{different solution} because pressure information from outside the extraction window is lost. For accurate reconstruction, use the pressure-coupled approach instead.
+\end{warningbox}
 
 \subsection{Fixed Outlet Direction (\texttt{-outletDirection})}
 \label{sec:fixed-outlet}
@@ -1649,7 +1702,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 \end{lstlisting}
 
 \begin{warningbox}
-These options are mutually exclusive. Using both \texttt{-inletOutletBC} and \texttt{-outletDirection} together produces an error with guidance.
+These options (\texttt{-inletOutletBC} and \texttt{-outletDirection}) are mutually exclusive. Using both together produces an error with guidance.
 \end{warningbox}
 
 \subsection{Boundary Condition Assignment Logic}
@@ -1820,10 +1873,14 @@ functions
         outputDir       "../subset-case";
 
         // Fields for time-varying boundary data (written every timestep)
-        fields          (U);              // Typically just velocity
+        fields          (U p);            // U and p for pressure-coupled BC
 
         // Fields for initial conditions (optional, defaults to 'fields')
         initialFields   (U p nut);        // More fields for IC
+
+        // Gradient extraction for pressure-coupled BC (RECOMMENDED)
+        extractGradients    true;
+        gradientFields      (p);          // Extract normal gradient of p
 
         // Write format: ascii, binary, deltaVarint, or dvzt
         writeFormat     dvzt;             // Recommended: best compression
@@ -1862,6 +1919,8 @@ functions
 \texttt{outputDir} & fileName & Yes & Output case directory \\
 \texttt{fields} & wordList & Yes & Fields for time-varying BC (boundaryData) \\
 \texttt{initialFields} & wordList & No & Fields for initial conditions (default: same as fields) \\
+\texttt{extractGradients} & bool & No & Enable gradient extraction (default: false) \\
+\texttt{gradientFields} & wordList & No & Fields for gradient extraction (requires extractGradients) \\
 \texttt{writeFormat} & word & No & \texttt{ascii}, \texttt{binary}, \texttt{deltaVarint}, or \texttt{dvzt} \\
 \texttt{deltaVarintPrecision} & label & No & Decimal digits (default: 6) \\
 \texttt{dvztKeyframeInterval} & label & No & Keyframe interval for dvzt (default: 20) \\
@@ -1883,22 +1942,99 @@ The extraction can separate which fields are used for:
 
 This allows extracting more fields for initial conditions (e.g., \texttt{U p nut k omega}) while only storing time-varying data for velocity:
 
-\begin{lstlisting}[language=OpenFOAM,caption={Field selection strategy}]
+\begin{lstlisting}[language=OpenFOAM,caption={Field selection strategy for pressure-coupled BC (RECOMMENDED)}]
 // In extraction function object
-fields          (U);               // Only U for time-varying BC (saves storage)
+fields          (U p);             // U and p for time-varying BC
 initialFields   (U p nut);         // More fields for initial conditions
+extractGradients    true;          // Enable gradient extraction
+gradientFields      (p);           // Extract normal gradient of p
 \end{lstlisting}
 
 Fields NOT in \texttt{boundaryData} automatically get \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
 
 \begin{tipbox}
-For unsteady turbulent flows with \texttt{-inletOutletBC}, the recommended approach is to extract only velocity (\texttt{U}) for boundary data while including all turbulence fields for initial conditions. This works because pressure and turbulence quantities use zeroGradient (no BC data needed), reducing storage by approximately 66\%.
+For accurate reconstruction, use the \textbf{pressure-coupled BC approach}: extract both \texttt{U} and \texttt{p} with gradient extraction enabled for \texttt{p}. This allows the \texttt{spaceTimeWindowCoupledPressure} BC to properly constrain the pressure field and reproduce the original solution.
 \end{tipbox}
+
+\begin{notebox}
+When \texttt{extractGradients} is enabled, the extractor computes the face-normal gradient at each boundary face using the equation:
+\[
+\left.\frac{\partial \phi}{\partial n}\right|_f = \frac{\phi_N - \phi_P}{|\mathbf{d}_{PN}|}
+\]
+where $\phi_P$ is the value at the face owner cell, $\phi_N$ is the value at the neighbour cell, and $\mathbf{d}_{PN}$ is the vector from owner to neighbour cell centre. The gradient data is written to files named \texttt{grad<fieldName>} (e.g., \texttt{gradp}) in the boundaryData directory.
+\end{notebox}
 
 \subsection{Boundary Condition Configuration}
 \label{sec:config-bc}
 
-\subsubsection{spaceTimeWindowInletOutlet (Recommended)}
+\subsubsection{spaceTimeWindowCoupledPressure (Recommended for Pressure)}
+\label{sec:bc-coupled-pressure}
+
+Mixed (Robin) boundary condition for pressure that blends Dirichlet and Neumann conditions based on local flux direction. This is the \textbf{recommended approach} for pressure at extraction boundaries. The parameters are listed in \cref{tab:bc-coupled-pressure-params}.
+
+\begin{lstlisting}[language=OpenFOAM,caption={spaceTimeWindowCoupledPressure configuration}]
+boundaryField
+{
+    oldInternalFaces
+    {
+        type                    spaceTimeWindowCoupledPressure;
+        dataDir                 "constant/boundaryData";
+        phi                     phi;          // Flux field name
+        dirichletWeight         0.8;          // Strength at inflow (0-1)
+        neumannWeight           0.8;          // Strength at outflow (0-1)
+        transitionWidth         0.1;          // Blending sharpness
+        allowTimeInterpolation  true;
+        timeInterpolationScheme cubic;        // or "linear" or "none"
+        value                   uniform 0;
+    }
+}
+\end{lstlisting}
+
+\textbf{How it works:}
+\begin{enumerate}
+    \item Reads pressure values and pressure gradients from boundaryData
+    \item Computes local flux at each face to determine flow direction
+    \item Calculates blending weight using smooth tanh transition:
+    \[
+    w = \frac{1}{2}\left(1 - \tanh\left(\frac{\phi_f / A_f}{\sigma}\right)\right)
+    \]
+    where $\phi_f$ is face flux, $A_f$ is face area, and $\sigma$ is transition width
+    \item At \textbf{inflow faces} ($w \to 1$): applies weighted Dirichlet (prescribed pressure)
+    \item At \textbf{outflow faces} ($w \to 0$): applies weighted Neumann (prescribed gradient)
+\end{enumerate}
+
+The value coefficients are:
+\begin{align}
+    \text{valueFraction} &= w \cdot w_D + (1 - w) \cdot 0 = w \cdot w_D \\
+    \text{refValue} &= p_{\text{extracted}} \\
+    \text{refGrad} &= \left.\frac{\partial p}{\partial n}\right|_{\text{extracted}}
+\end{align}
+where $w_D$ is \texttt{dirichletWeight} and the gradient coefficient is $(1-w) \cdot w_N$ with $w_N$ being \texttt{neumannWeight}.
+
+\begin{table}[htbp]
+\centering
+\caption{spaceTimeWindowCoupledPressure parameters}
+\label{tab:bc-coupled-pressure-params}
+\begin{tabularx}{\textwidth}{@{}lllX@{}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{dataDir} & fileName & \texttt{constant/boundaryData} & Path to boundary data \\
+\texttt{phi} & word & \texttt{phi} & Name of flux field \\
+\texttt{dirichletWeight} & scalar & 0.8 & Dirichlet contribution strength at inflow (0-1) \\
+\texttt{neumannWeight} & scalar & 0.8 & Neumann contribution strength at outflow (0-1) \\
+\texttt{transitionWidth} & scalar & 0.1 & Sharpness of inflow/outflow transition \\
+\texttt{allowTimeInterpolation} & bool & \texttt{false} & Permit interpolation for missing timesteps \\
+\texttt{timeInterpolationScheme} & word & \texttt{linear} & \texttt{none}, \texttt{linear}, or \texttt{cubic} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{notebox}
+This BC requires gradient data in boundaryData. Enable gradient extraction with \texttt{extractGradients true} and \texttt{gradientFields (p)} in the extraction configuration. The gradient file must be named \texttt{gradp} in each timestep directory.
+\end{notebox}
+
+\subsubsection{spaceTimeWindowInletOutlet}
 
 Flux-based boundary condition that reads pre-computed velocity values and applies them only at inflow faces. The parameters are listed in \cref{tab:bc-inletoutlet-params}.
 

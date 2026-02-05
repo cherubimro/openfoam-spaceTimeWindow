@@ -33,7 +33,13 @@ Unlike velocity (which is advected and hyperbolic), pressure is governed by an *
 - Mass conservation issues
 - Different flow behavior than the source simulation
 
-The `spaceTimeWindowCoupledPressure` BC solves this by **blending Dirichlet and Neumann conditions** based on local flux direction:
+The `spaceTimeWindowCoupledPressure` BC solves this by **blending Dirichlet and Neumann conditions** based on local flux. Two blending modes are available:
+
+**fluxMagnitude mode (default, recommended):**
+- **At stagnant faces (zero flux)**: Uses Dirichlet (safe to prescribe pressure)
+- **At active flow faces**: Uses Neumann (gradient for continuity compatibility)
+
+**flowDirection mode (original):**
 - **At inflow faces**: More weight towards Dirichlet (pressure enters from outside)
 - **At outflow faces**: More weight towards Neumann (pressure from interior dominates)
 
@@ -45,12 +51,13 @@ extractSubset
     libs            (spaceTimeWindow);
     box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
     outputDir       "../subset";
-    fields          (U p);
-    initialFields   (U p nut);
+
+    fields          (U p);          // Time-varying BC data (U and p for boundaries)
+    initialFields   (U p nut);      // Initial conditions (nut needed for turbulence model)
 
     // Enable gradient extraction for pressure coupling
     extractGradients    true;
-    gradientFields      (p);    // Extract normal gradient of pressure
+    gradientFields      (p);        // Extract normal gradient of pressure (creates gradp)
 
     writeFormat     deltaVarint;
     writeControl    timeStep;
@@ -66,8 +73,9 @@ oldInternalFaces
     type            spaceTimeWindowCoupledPressure;
     dataDir         "constant/boundaryData";
     phi             phi;
-    dirichletWeight 0.8;    // Weight at inflow (0-1)
-    neumannWeight   0.8;    // Weight at outflow (0-1)
+    blendingMode    fluxMagnitude;  // or flowDirection (default: fluxMagnitude)
+    dirichletWeight 0.8;    // Weight at zero-flux faces (fluxMagnitude) or inflow (flowDirection)
+    neumannWeight   0.8;    // Weight at active-flow faces (fluxMagnitude) or outflow (flowDirection)
     transitionWidth 0.1;    // Smooth transition width
     timeInterpolationScheme cubic;
     value           uniform 0;
@@ -115,12 +123,22 @@ The extraction can separate which fields are used for:
 - **Initial conditions** (`initialFields`): Fields written to the start time directory for solver initialization
 - **Time-varying boundary data** (`fields`): Fields written to `boundaryData/` for time-varying BCs
 
-This allows extracting more fields for initial conditions (e.g., `U p nut k omega`) while only storing time-varying data for velocity:
+For pressure-coupled BC (recommended), extract both U and p with gradients:
 
 ```cpp
-// In extraction function object
-fields          (U);           // Only U for time-varying BC (saves storage)
-initialFields   (U p nut);     // More fields for initial conditions
+// In extraction function object - pressure-coupled (recommended)
+fields          (U p);             // Both U and p for time-varying BC
+initialFields   (U p nut);         // nut needed for turbulence model
+extractGradients    true;
+gradientFields      (p);           // Creates gradp for Neumann blending
+```
+
+For quick tests with `-inletOutletBC`, only U needs time-varying data:
+
+```cpp
+// In extraction function object - quick tests only
+fields          (U);               // Only U for time-varying BC (saves storage)
+initialFields   (U p nut);         // More fields for initial conditions
 ```
 
 Fields NOT in `boundaryData` automatically get `zeroGradient` BC on `oldInternalFaces`.
@@ -208,10 +226,14 @@ functions
         outputDir       "../subset-case";        // Output case directory
 
         // Fields for time-varying boundary data (written every timestep)
-        fields          (U);                     // Typically just velocity
+        fields          (U p);                   // U and p for pressure-coupled BC
 
         // Fields for initial conditions (optional, defaults to 'fields')
-        initialFields   (U p nut);               // More fields for IC
+        initialFields   (U p nut);               // nut needed for turbulence model
+
+        // Enable gradient extraction for pressure-coupled BC
+        extractGradients    true;
+        gradientFields      (p);                 // Creates gradp for Neumann part
 
         // Write format for boundary data (optional)
         // Options: ascii, binary, deltaVarint, dvzt
@@ -341,8 +363,9 @@ oldInternalFaces
     type            spaceTimeWindowCoupledPressure;
     dataDir         "constant/boundaryData";
     phi             phi;                        // Flux field name
-    dirichletWeight 0.8;                        // Weight at inflow (0-1)
-    neumannWeight   0.8;                        // Weight at outflow (0-1)
+    blendingMode    fluxMagnitude;              // or flowDirection
+    dirichletWeight 0.8;                        // Dirichlet strength (0-1)
+    neumannWeight   0.8;                        // Neumann strength (0-1)
     transitionWidth 0.1;                        // Smooth transition width
     allowTimeInterpolation  true;
     timeInterpolationScheme cubic;              // or "linear" or "none"
@@ -352,13 +375,17 @@ oldInternalFaces
 
 **How it works:**
 
-The BC implements a mixed (Robin) condition that adapts to local flow direction:
+The BC implements a mixed (Robin) condition that adapts based on local flux:
 
 1. At each timestep, reads both pressure values (`p`) and normal gradients (`gradp`) from boundaryData
-2. Computes blending weight `w` for each face based on flux direction using a smooth tanh transition
+2. Computes blending weight `w` for each face based on flux using a smooth tanh transition
 3. Applies: `p_face = w * p_Dirichlet + (1-w) * (p_cell + gradp_Neumann * d)`
 
-Where:
+**fluxMagnitude mode** (recommended):
+- At zero-flux faces: `w -> dirichletWeight` (safe to prescribe pressure at stagnant faces)
+- At high-flux faces: `w -> 1 - neumannWeight` (use gradient for continuity compatibility)
+
+**flowDirection mode** (original):
 - At inflow faces (phi < 0): `w -> dirichletWeight` (pressure enters from outside)
 - At outflow faces (phi > 0): `w -> 1 - neumannWeight` (pressure from interior dominates)
 
@@ -378,8 +405,9 @@ This ensures C∞ continuity at the transition, avoiding numerical artifacts.
 |----------------|------------------------------------------------|----------|----------------------|
 | dataDir        | Path to boundaryData directory                 | no       | constant/boundaryData |
 | phi            | Name of flux field                             | no       | phi                  |
-| dirichletWeight | Weight towards Dirichlet at inflow faces (0-1) | no      | 0.8                  |
-| neumannWeight  | Weight towards Neumann at outflow faces (0-1)  | no       | 0.8                  |
+| blendingMode   | `fluxMagnitude` or `flowDirection`             | no       | fluxMagnitude        |
+| dirichletWeight | Dirichlet contribution strength (0-1)         | no       | 0.8                  |
+| neumannWeight  | Neumann contribution strength (0-1)            | no       | 0.8                  |
 | transitionWidth | Normalized flux width for smooth transition   | no       | 0.1                  |
 | pressureField  | Name of pressure data file in boundaryData     | no       | p                    |
 | gradientField  | Name of gradient data file in boundaryData     | no       | gradp                |

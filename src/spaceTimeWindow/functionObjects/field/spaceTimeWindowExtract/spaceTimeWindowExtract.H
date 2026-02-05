@@ -128,6 +128,12 @@ protected:
         //  Defaults to fieldNames_ if not specified
         wordList initialFieldNames_;
 
+        //- Extract gradients for specified fields (for pressure coupling)
+        bool extractGradients_;
+
+        //- List of fields for which to extract normal gradients
+        wordList gradientFieldNames_;
+
         //- Write format for boundary data (ascii or binary)
         IOstreamOption::streamFormat writeFormat_;
 
@@ -288,6 +294,13 @@ protected:
             const fileName& dir,
             const word& fieldName,
             const Field<Type>& field
+        ) const;
+
+        //- Compute normal gradient at extraction boundary faces
+        //  Returns field of (grad(phi) dot n) for each face
+        tmp<scalarField> computeNormalGradient
+        (
+            const volScalarField& field
         ) const;
 
 

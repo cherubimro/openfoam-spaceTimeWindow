@@ -18,6 +18,7 @@ License
 #include "OFstream.H"
 #include "Time.H"
 #include "surfaceFields.H"
+#include "fvcGrad.H"
 #include "Pstream.H"
 #include "PstreamBuffers.H"
 #include "foamVersion.H"
@@ -1231,6 +1232,135 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
 }
 
 
+Foam::tmp<Foam::scalarField>
+Foam::functionObjects::spaceTimeWindowExtract::computeNormalGradient
+(
+    const volScalarField& field
+) const
+{
+    // Compute the gradient of the field using fvc::grad
+    volVectorField gradField = fvc::grad(field);
+
+    auto tnormalGrad = tmp<scalarField>::New(faceCellsInside_.size());
+    scalarField& normalGrad = tnormalGrad.ref();
+
+    const vectorField& faceAreasAll = mesh_.faceAreas();
+
+    // For parallel runs with processor boundary faces, we need to exchange
+    // gradient values for remote cells
+    if (Pstream::parRun() && hasProcessorBoundaryFaces_)
+    {
+        const polyBoundaryMesh& pbm = mesh_.boundaryMesh();
+        PstreamBuffers pBufs(Pstream::commsTypes::nonBlocking);
+
+        // Send our cell gradient values to neighbours
+        forAll(pbm, patchi)
+        {
+            const polyPatch& pp = pbm[patchi];
+
+            if (isA<processorPolyPatch>(pp))
+            {
+                const processorPolyPatch& procPatch =
+                    refCast<const processorPolyPatch>(pp);
+
+                // Send gradient values for cells adjacent to this patch
+                vectorField localGrads(pp.size());
+                forAll(pp, i)
+                {
+                    label owner = mesh_.faceOwner()[pp.start() + i];
+                    localGrads[i] = gradField[owner];
+                }
+
+                UOPstream toNbr(procPatch.neighbProcNo(), pBufs);
+                toNbr << localGrads;
+            }
+        }
+
+        pBufs.finishedSends();
+
+        // Build map of patch face index to received gradient
+        Map<vector> patchFaceToGrad;
+
+        forAll(pbm, patchi)
+        {
+            const polyPatch& pp = pbm[patchi];
+
+            if (isA<processorPolyPatch>(pp))
+            {
+                const processorPolyPatch& procPatch =
+                    refCast<const processorPolyPatch>(pp);
+
+                vectorField receivedGrads(pp.size());
+                UIPstream fromNbr(procPatch.neighbProcNo(), pBufs);
+                fromNbr >> receivedGrads;
+
+                forAll(receivedGrads, i)
+                {
+                    label facei = pp.start() + i;
+                    patchFaceToGrad.insert(facei, receivedGrads[i]);
+                }
+            }
+        }
+
+        // Now compute normal gradients at extraction boundary faces
+        forAll(normalGrad, i)
+        {
+            label facei = oldInternalFaceIndices_[i];
+
+            // Face normal pointing outward from subset (from inside to outside)
+            vector Sf = faceAreasAll[facei];
+            scalar magSf = mag(Sf);
+            vector n = Sf / (magSf + SMALL);
+
+            // Get gradients from inside and outside cells
+            vector gradInside = gradField[faceCellsInside_[i]];
+            vector gradOutside;
+
+            auto iter = patchFaceToGrad.find(facei);
+            if (iter.good())
+            {
+                gradOutside = iter.val();
+            }
+            else
+            {
+                gradOutside = gradField[faceCellsOutside_[i]];
+            }
+
+            // Interpolate gradient to face and project onto normal
+            scalar w = faceWeights_[i];
+            vector gradFace = w * gradInside + (1.0 - w) * gradOutside;
+
+            // Normal gradient = grad(field) . n
+            normalGrad[i] = gradFace & n;
+        }
+    }
+    else
+    {
+        // Serial or no processor boundary faces
+        forAll(normalGrad, i)
+        {
+            label facei = oldInternalFaceIndices_[i];
+
+            // Face normal pointing outward from subset
+            vector Sf = faceAreasAll[facei];
+            scalar magSf = mag(Sf);
+            vector n = Sf / (magSf + SMALL);
+
+            // Interpolate gradient to face
+            vector gradInside = gradField[faceCellsInside_[i]];
+            vector gradOutside = gradField[faceCellsOutside_[i]];
+            scalar w = faceWeights_[i];
+            vector gradFace = w * gradInside + (1.0 - w) * gradOutside;
+
+            // Normal gradient = grad(field) . n
+            normalGrad[i] = gradFace & n;
+        }
+    }
+
+    return tnormalGrad;
+}
+
+
 void Foam::functionObjects::spaceTimeWindowExtract::writeBoundaryData()
 {
     const word timeName = mesh_.time().timeName();
@@ -1302,6 +1432,43 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeBoundaryData()
             else
             {
                 writeField(boundaryTimeDir, fieldName, tfaceValues());
+            }
+        }
+    }
+
+    // Extract gradients if enabled (for pressure-coupled BC)
+    if (extractGradients_)
+    {
+        for (const word& fieldName : gradientFieldNames_)
+        {
+            // Only scalar fields supported for gradient extraction
+            const auto* sfPtr = mesh_.findObject<volScalarField>(fieldName);
+            if (sfPtr)
+            {
+                tmp<scalarField> tnormalGrad = computeNormalGradient(*sfPtr);
+
+                // Write as "grad<fieldName>" (e.g., "gradp" for pressure)
+                word gradFieldName = "grad" + fieldName;
+
+                // Gather to master and write
+                if (Pstream::parRun())
+                {
+                    tmp<scalarField> tgathered = gatherFieldToMaster(tnormalGrad());
+                    if (Pstream::master())
+                    {
+                        writeField(boundaryTimeDir, gradFieldName, tgathered());
+                    }
+                }
+                else
+                {
+                    writeField(boundaryTimeDir, gradFieldName, tnormalGrad());
+                }
+            }
+            else
+            {
+                WarningInFunction
+                    << "Field '" << fieldName << "' not found for gradient extraction"
+                    << endl;
             }
         }
     }
@@ -1685,6 +1852,8 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     outputDir_(),
     fieldNames_(),
     initialFieldNames_(),
+    extractGradients_(false),
+    gradientFieldNames_(),
     writeFormat_(IOstreamOption::ASCII),
     writeCompression_(IOstreamOption::UNCOMPRESSED),
     useDeltaVarint_(false),
@@ -1792,6 +1961,16 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     if (!dict.readIfPresent("initialFields", initialFieldNames_))
     {
         initialFieldNames_ = fieldNames_;
+    }
+
+    // Read gradient extraction options (for pressure-coupled BC)
+    extractGradients_ = dict.getOrDefault<bool>("extractGradients", false);
+    if (extractGradients_)
+    {
+        dict.readEntry("gradientFields", gradientFieldNames_);
+        Info<< type() << " " << name()
+            << ": Gradient extraction enabled for fields: "
+            << gradientFieldNames_ << endl;
     }
 
     // Read write format (ascii, binary, deltaVarint, or deltaVarintTemporal), default to ascii

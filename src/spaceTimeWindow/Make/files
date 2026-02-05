@@ -4,6 +4,7 @@ codec/sodiumCrypto.C
 interpolation/spatialInterpolation2D/spatialInterpolation2D.C
 fvPatchFields/derived/spaceTimeWindowFvPatchField/spaceTimeWindowFvPatchFields.C
 fvPatchFields/derived/spaceTimeWindowInletOutletFvPatchField/spaceTimeWindowInletOutletFvPatchFields.C
+fvPatchFields/derived/spaceTimeWindowCoupledPressureFvPatchField/spaceTimeWindowCoupledPressureFvPatchScalarField.C
 functionObjects/field/spaceTimeWindowExtract/spaceTimeWindowExtract.C
 
 LIB = $(FOAM_USER_LIBBIN)/libspaceTimeWindow

@@ -775,8 +775,8 @@ Large-scale CFD simulations invariably run in parallel using MPI (Message Passin
     };
 
     % Output file
-    \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight, minimum height=0.8cm, minimum width=1.2cm, aspect=0.3] (file) at (0.5,-4) {};
-    \node[font=\sffamily\tiny, warningorange] at (0.5,-4) {U.dvz};
+    \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight, minimum height=0.8cm, minimum width=1.6cm, aspect=0.3] (file) at (0.5,-4) {};
+    \node[font=\sffamily\tiny, warningorange] at (0.5,-4) {U,p,gradp};
 
     \draw[->, line width=1.5pt, secondarygreen] (master) -- (file);
 
@@ -842,20 +842,20 @@ In parallel mode, the extraction process operates as follows:
     \node[procbox, fill=secondarylight, draw=secondarygreen] (p0) at (0,6) {};
     \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (0,7) {P0 (Master)};
     \node[databox, fill=white, draw=primaryblue] at (0,6.3) {Local faces: 127};
-    \node[databox, fill=white, draw=warningorange] at (0,5.5) {U values};
+    \node[databox, fill=white, draw=warningorange] at (0,5.5) {U,p,gradp};
     \node[font=\sffamily\tiny, gray] at (0,4.9) {+ gathering};
 
     % P1
     \node[procbox, fill=primarylight, draw=primaryblue] (p1) at (4,6) {};
     \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (4,7) {P1};
     \node[databox, fill=white, draw=primaryblue] at (4,6.3) {Local faces: 89};
-    \node[databox, fill=white, draw=warningorange] at (4,5.5) {U values};
+    \node[databox, fill=white, draw=warningorange] at (4,5.5) {U,p,gradp};
 
     % P2
     \node[procbox, fill=primarylight, draw=primaryblue] (p2) at (8,6) {};
     \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (8,7) {P2};
     \node[databox, fill=white, draw=primaryblue] at (8,6.3) {Local faces: 156};
-    \node[databox, fill=white, draw=warningorange] at (8,5.5) {U values};
+    \node[databox, fill=white, draw=warningorange] at (8,5.5) {U,p,gradp};
 
     % P3
     \node[procbox, fill=primarylight, draw=primaryblue] (p3) at (12,6) {};
@@ -883,7 +883,7 @@ In parallel mode, the extraction process operates as follows:
           minimum width=5cm, minimum height=1.8cm] (merged) at (2,0.5) {};
     \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (2,1.3) {Merged Global Data};
     \node[databox, fill=white, draw=primaryblue] at (2,0.6) {Total faces: 372};
-    \node[databox, fill=white, draw=warningorange] at (2,-0.1) {U[0..371]};
+    \node[databox, fill=white, draw=warningorange] at (2,-0.1) {U,p,gradp[0..371]};
 
     % Arrow from MPI to merged
     \draw[arrow, accentpurple, line width=1.5pt] (6,2.3) -- (6,1.8) -| (2,1.4);
@@ -891,7 +891,7 @@ In parallel mode, the extraction process operates as follows:
     % === OUTPUT FILE ===
     \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight,
           minimum height=1.2cm, minimum width=2cm, aspect=0.25, line width=1.5pt] (file) at (10,0.5) {};
-    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {0.001/U.dvz};
+    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {U,p,gradp.dvz};
 
     % Arrow from merged to file
     \draw[arrow, secondarygreen, line width=2pt] (4.5,0.5) -- node[above, font=\sffamily\footnotesize] {write} (8,0.5);
@@ -983,7 +983,7 @@ The extracted data consists of two distinct components, illustrated in \cref{fig
 
     % Boundary data files for each timestep
     \foreach \x in {3, 5, 7, 9, 11} {
-        \node[file, fill=white, draw=warningorange, minimum width=1cm, font=\sffamily\tiny] at (\x,1.7) {U};
+        \node[file, fill=white, draw=warningorange, minimum width=1.2cm, font=\sffamily\tiny] at (\x,1.7) {U,p,gradp};
     }
     \node[font=\sffamily\tiny, gray] at (9,1.7) {...};
 
@@ -1113,8 +1113,8 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
 
     % Files in boundaryData
     \node[smallbox, fill=white, draw=warningorange] at (0,6.8) {U.dvz (velocity)};
-    \node[smallbox, fill=white, draw=gray!50] at (0,6.1) {points};
-    \node[smallbox, fill=white, draw=gray!50] at (0,5.4) {extractionMetadata};
+    \node[smallbox, fill=white, draw=primaryblue] at (0,6.1) {p.dvz, gradp.dvz};
+    \node[smallbox, fill=white, draw=gray!50] at (0,5.4) {points, metadata};
 
     % === ANALYSIS STEP ===
     \node[box, fill=accentlight, draw=accentpurple, minimum width=5cm, minimum height=2.5cm] (analyze) at (7,7) {};
@@ -1126,8 +1126,8 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
         2. Detect available fields\\
         3. Check mesh resolution\\
         4. Determine BC types:\\
-        \quad - Vector + data $\rightarrow$ InletOutlet\\
-        \quad - Scalar + data $\rightarrow$ zeroGradient\\
+        \quad - U + data $\rightarrow$ spaceTimeWindow\\
+        \quad - p + gradp $\rightarrow$ CoupledPressure\\
         \quad - No data $\rightarrow$ zeroGradient
     };
 
@@ -1155,14 +1155,14 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
     \node[rectangle, rounded corners=4pt, fill=codebg, draw=codeframe, line width=1pt,
           text width=13cm, inner sep=8pt] (bcdetail) at (7,2) {
         \begin{minipage}{\linewidth}
-        \centering\textbf{Automatic Boundary Condition Assignment (oldInternalFaces patch)}
+        \centering\textbf{Recommended Boundary Condition Assignment (oldInternalFaces patch)}
         \vspace{0.3em}
 
         \begin{tabular}{@{}l@{\quad}l@{\quad}l@{}}
         \textbf{Field} & \textbf{Condition} & \textbf{Assigned BC} \\[0.3em]
-        \textcolor{primaryblue}{U (velocity)} & Has boundaryData + \texttt{-inletOutletBC} & \texttt{spaceTimeWindowInletOutlet} \\
-        \textcolor{secondarygreen}{p (pressure)} & No boundaryData & \texttt{zeroGradient} \\
-        \textcolor{warningorange}{nut, k, $\omega$} & Scalar fields & \texttt{zeroGradient} \\
+        \textcolor{primaryblue}{U (velocity)} & Has U in boundaryData & \texttt{spaceTimeWindow} (Dirichlet) \\
+        \textcolor{secondarygreen}{p (pressure)} & Has p + gradp in boundaryData & \texttt{spaceTimeWindowCoupledPressure} \\
+        \textcolor{warningorange}{nut, k, $\omega$} & No boundaryData & \texttt{zeroGradient} \\
         \end{tabular}
         \end{minipage}
     };
@@ -1174,7 +1174,7 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
     \draw[dashed, gray, line width=1pt, rounded corners=8pt] (-2.5,3.8) rectangle (16.5,10.5);
     \node[fill=white, font=\sffamily\footnotesize, gray] at (7,10.5) {Laptop / Desktop Computer (Offline Reconstruction)};
 \end{tikzpicture}
-\caption{Automatic boundary condition configuration during case initialization. The \texttt{spaceTimeWindowInitCase} utility analyzes extracted data and automatically assigns appropriate boundary conditions based on field type and data availability.}
+\caption{Recommended boundary condition configuration for pressure-coupled reconstruction. The \texttt{spaceTimeWindowInitCase} utility can assign BCs based on available data: \texttt{spaceTimeWindow} for velocity (Dirichlet), \texttt{spaceTimeWindowCoupledPressure} for pressure (mixed Dirichlet/Neumann), and \texttt{zeroGradient} for turbulence fields.}
 \label{fig:auto-bc-config}
 \end{figure}
 
@@ -1214,7 +1214,7 @@ The reconstruction can run at \textbf{different mesh resolutions} than the origi
 
     % Source data indicator
     \node[rectangle, rounded corners=2pt, fill=warninglight, draw=warningorange,
-          font=\sffamily\tiny, inner sep=2pt] at (2,4) {U data stored};
+          font=\sffamily\tiny, inner sep=2pt] at (2,4) {U,p,gradp stored};
 
     % === ARROWS TO DIFFERENT RESOLUTIONS ===
 
@@ -1619,16 +1619,19 @@ The \textbf{recommended approach} for accurate reconstruction uses the \texttt{s
 
 \begin{itemize}
     \item \textbf{Velocity (U)}: \texttt{spaceTimeWindow} --- pure Dirichlet from extracted data
-    \item \textbf{Pressure (p)}: \texttt{spaceTimeWindowCoupledPressure} --- mixed Dirichlet/Neumann based on flux direction
+    \item \textbf{Pressure (p)}: \texttt{spaceTimeWindowCoupledPressure} --- mixed Dirichlet/Neumann based on flux
     \item \textbf{Turbulence fields}: \texttt{zeroGradient}
 \end{itemize}
 
 \textbf{Why this approach is physically correct:}
 \begin{itemize}
     \item Pressure is governed by an elliptic Poisson equation --- cutting the domain severs the pressure's ability to ``feel'' the flow outside the window
-    \item At \textbf{inflow faces}, pressure from outside dominates and is prescribed (Dirichlet)
-    \item At \textbf{outflow faces}, pressure should adjust freely so only the gradient is prescribed (Neumann)
-    \item The BC uses smooth tanh-based blending to transition between these limits
+    \item The BC uses smooth tanh-based blending to transition between Dirichlet and Neumann limits
+    \item Two blending modes are available:
+    \begin{itemize}
+        \item \texttt{fluxMagnitude} (default, recommended): Dirichlet at stagnant faces, Neumann at active flow faces --- more compatible with continuity
+        \item \texttt{flowDirection}: Dirichlet at inflow faces, Neumann at outflow faces --- the original approach
+    \end{itemize}
     \item This \textbf{reproduces the original flow} rather than computing a different solution
 \end{itemize}
 
@@ -1649,8 +1652,9 @@ oldInternalFaces
     type            spaceTimeWindowCoupledPressure;
     dataDir         "constant/boundaryData";
     phi             phi;
-    dirichletWeight 0.8;      // Strength at inflow (0-1)
-    neumannWeight   0.8;      // Strength at outflow (0-1)
+    blendingMode    fluxMagnitude;  // or flowDirection
+    dirichletWeight 0.8;      // Dirichlet strength (0-1)
+    neumannWeight   0.8;      // Neumann strength (0-1)
     transitionWidth 0.1;      // Blending sharpness
     allowTimeInterpolation  true;
     timeInterpolationScheme cubic;
@@ -1876,7 +1880,7 @@ functions
         fields          (U p);            // U and p for pressure-coupled BC
 
         // Fields for initial conditions (optional, defaults to 'fields')
-        initialFields   (U p nut);        // More fields for IC
+        initialFields   (U p nut);        // nut needed for turbulence model
 
         // Gradient extraction for pressure-coupled BC (RECOMMENDED)
         extractGradients    true;
@@ -1940,15 +1944,17 @@ The extraction can separate which fields are used for:
     \item \textbf{Time-varying boundary data} (\texttt{fields}): Fields written to \texttt{boundaryData/} for time-varying BCs
 \end{itemize}
 
-This allows extracting more fields for initial conditions (e.g., \texttt{U p nut k omega}) while only storing time-varying data for velocity:
+For the recommended pressure-coupled approach:
 
 \begin{lstlisting}[language=OpenFOAM,caption={Field selection strategy for pressure-coupled BC (RECOMMENDED)}]
 // In extraction function object
 fields          (U p);             // U and p for time-varying BC
-initialFields   (U p nut);         // More fields for initial conditions
+initialFields   (U p nut);         // nut needed for turbulence model
 extractGradients    true;          // Enable gradient extraction
-gradientFields      (p);           // Extract normal gradient of p
+gradientFields      (p);           // Extract normal gradient of p (creates gradp)
 \end{lstlisting}
+
+Note: \texttt{nut} is only needed in \texttt{initialFields} (not in \texttt{fields}) because turbulent viscosity is computed by the turbulence model at runtime and uses \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
 
 Fields NOT in \texttt{boundaryData} automatically get \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
 
@@ -1970,7 +1976,14 @@ where $\phi_P$ is the value at the face owner cell, $\phi_N$ is the value at the
 \subsubsection{spaceTimeWindowCoupledPressure (Recommended for Pressure)}
 \label{sec:bc-coupled-pressure}
 
-Mixed (Robin) boundary condition for pressure that blends Dirichlet and Neumann conditions based on local flux direction. This is the \textbf{recommended approach} for pressure at extraction boundaries. The parameters are listed in \cref{tab:bc-coupled-pressure-params}.
+Mixed (Robin) boundary condition for pressure that blends Dirichlet and Neumann conditions based on local flux. This is the \textbf{recommended approach} for pressure at extraction boundaries. Two blending modes are available:
+
+\begin{itemize}
+    \item \texttt{fluxMagnitude} (default, recommended): Dirichlet at stagnant faces (zero flux), Neumann at active flow faces --- better continuity compatibility
+    \item \texttt{flowDirection}: Dirichlet at inflow, Neumann at outflow --- the original flow-direction-based approach
+\end{itemize}
+
+The parameters are listed in \cref{tab:bc-coupled-pressure-params}.
 
 \begin{lstlisting}[language=OpenFOAM,caption={spaceTimeWindowCoupledPressure configuration}]
 boundaryField
@@ -1980,8 +1993,9 @@ boundaryField
         type                    spaceTimeWindowCoupledPressure;
         dataDir                 "constant/boundaryData";
         phi                     phi;          // Flux field name
-        dirichletWeight         0.8;          // Strength at inflow (0-1)
-        neumannWeight           0.8;          // Strength at outflow (0-1)
+        blendingMode            fluxMagnitude;  // or flowDirection
+        dirichletWeight         0.8;          // Dirichlet strength (0-1)
+        neumannWeight           0.8;          // Neumann strength (0-1)
         transitionWidth         0.1;          // Blending sharpness
         allowTimeInterpolation  true;
         timeInterpolationScheme cubic;        // or "linear" or "none"
@@ -1993,14 +2007,14 @@ boundaryField
 \textbf{How it works:}
 \begin{enumerate}
     \item Reads pressure values and pressure gradients from boundaryData
-    \item Computes local flux at each face to determine flow direction
-    \item Calculates blending weight using smooth tanh transition:
-    \[
-    w = \frac{1}{2}\left(1 - \tanh\left(\frac{\phi_f / A_f}{\sigma}\right)\right)
-    \]
-    where $\phi_f$ is face flux, $A_f$ is face area, and $\sigma$ is transition width
-    \item At \textbf{inflow faces} ($w \to 1$): applies weighted Dirichlet (prescribed pressure)
-    \item At \textbf{outflow faces} ($w \to 0$): applies weighted Neumann (prescribed gradient)
+    \item Computes local flux at each face
+    \item Calculates blending weight using smooth tanh transition based on the selected mode:
+    \begin{itemize}
+        \item \texttt{fluxMagnitude}: $w = w_D + (w_N' - w_D) \cdot \tanh(|\phi_f| / \phi_{\max} / \sigma)$ --- where $w_D$ is \texttt{dirichletWeight} and $w_N' = 1 - w_N$
+        \item \texttt{flowDirection}: $w = \frac{1}{2}\left((w_D + w_N') - (w_D - w_N') \cdot \tanh(\phi_f / \phi_{\max} / \sigma)\right)$
+    \end{itemize}
+    \item In \texttt{fluxMagnitude} mode: at \textbf{stagnant faces} ($w \to w_D$) applies Dirichlet; at \textbf{high-flux faces} ($w \to w_N'$) applies Neumann
+    \item In \texttt{flowDirection} mode: at \textbf{inflow faces} ($w \to w_D$) applies Dirichlet; at \textbf{outflow faces} ($w \to w_N'$) applies Neumann
 \end{enumerate}
 
 The value coefficients are:
@@ -2021,9 +2035,10 @@ where $w_D$ is \texttt{dirichletWeight} and the gradient coefficient is $(1-w) \
 \midrule
 \texttt{dataDir} & fileName & \texttt{constant/boundaryData} & Path to boundary data \\
 \texttt{phi} & word & \texttt{phi} & Name of flux field \\
-\texttt{dirichletWeight} & scalar & 0.8 & Dirichlet contribution strength at inflow (0-1) \\
-\texttt{neumannWeight} & scalar & 0.8 & Neumann contribution strength at outflow (0-1) \\
-\texttt{transitionWidth} & scalar & 0.1 & Sharpness of inflow/outflow transition \\
+\texttt{blendingMode} & word & \texttt{fluxMagnitude} & \texttt{fluxMagnitude} or \texttt{flowDirection} \\
+\texttt{dirichletWeight} & scalar & 0.8 & Dirichlet contribution strength (0-1) \\
+\texttt{neumannWeight} & scalar & 0.8 & Neumann contribution strength (0-1) \\
+\texttt{transitionWidth} & scalar & 0.1 & Sharpness of flux transition \\
 \texttt{allowTimeInterpolation} & bool & \texttt{false} & Permit interpolation for missing timesteps \\
 \texttt{timeInterpolationScheme} & word & \texttt{linear} & \texttt{none}, \texttt{linear}, or \texttt{cubic} \\
 \bottomrule
@@ -2612,8 +2627,8 @@ outputDir/
                 extractionMetadata  # Settings and timestep list
                 0.0001/
                     U               # or U.dvz or U.dvz.enc
-                    p
-                    nut
+                    p               # pressure (for coupled BC)
+                    gradp           # pressure gradient (for coupled BC)
                 0.0002/
                     ...
     0.0001/                     # Initial fields (serial only)
@@ -3189,10 +3204,10 @@ lz4 & 4.1~MB & 13.56\% & 763.0~MB/s & Fastest \\
 \begin{lstlisting}[language=bash,caption={Archival compression example}]
 # Archive with best compression (7z)
 cd subset-case/constant/boundaryData/oldInternalFaces
-7z a -m0=lzma2 -mx=9 ../boundaryData.7z */U.dvz */U.dvzt
+7z a -m0=lzma2 -mx=9 ../boundaryData.7z */*.dvz */*.dvzt
 
 # Or with zstd for faster compression
-tar -cf - */U.dvz */U.dvzt | zstd -3 > ../boundaryData.tar.zst
+tar -cf - */*.dvz */*.dvzt | zstd -3 > ../boundaryData.tar.zst
 \end{lstlisting}
 
 \subsection{Extraction Metadata}
@@ -3301,9 +3316,9 @@ When all boundary patches have \texttt{fixesValue=true}, \texttt{adjustPhi()} ca
 
 The \texttt{spaceTimeWindowCoupledPressure} BC handles mass conservation while accurately reproducing the original pressure field:
 \begin{itemize}
-    \item Uses mixed Dirichlet/Neumann based on flux direction
-    \item Inflow faces: Dirichlet (prescribed pressure)
-    \item Outflow faces: Neumann (prescribed gradient allows natural outflow)
+    \item Uses mixed Dirichlet/Neumann based on local flux
+    \item Two modes: \texttt{fluxMagnitude} (default, Dirichlet at stagnant faces) or \texttt{flowDirection} (Dirichlet at inflow)
+    \item Neumann faces allow natural pressure adjustment for continuity compatibility
     \item Requires gradient extraction during source simulation
 \end{itemize}
 

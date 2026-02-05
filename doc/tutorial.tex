@@ -2148,7 +2148,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 \midrule
 \texttt{-sourceCase} & directory & Source case where extraction ran (required) \\
 \texttt{-extractDir} & directory & Directory with extracted data (default: cwd) \\
-\texttt{-inletOutletBC} & flag & \textbf{Recommended.} Use flux-based inlet-outlet BC for U, zeroGradient for scalars \\
+\texttt{-inletOutletBC} & flag & Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) \\
 \texttt{-outletDirection} & vector & Create fixed outlet patch in given direction (e.g., ``(1 0 0)'') \\
 \texttt{-outletFraction} & scalar & Fraction of box extent for outlet region (default: 0.1) \\
 \texttt{-correctMassFlux} & flag & Apply least-squares mass flux correction to boundaryData \\
@@ -3297,7 +3297,19 @@ When all boundary patches have \texttt{fixesValue=true}, \texttt{adjustPhi()} ca
 
 \subsection{Solutions}
 
-\subsubsection{Use \texttt{-inletOutletBC} (Recommended)}
+\subsubsection{Use Pressure-Coupled BC (Recommended)}
+
+The \texttt{spaceTimeWindowCoupledPressure} BC handles mass conservation while accurately reproducing the original pressure field:
+\begin{itemize}
+    \item Uses mixed Dirichlet/Neumann based on flux direction
+    \item Inflow faces: Dirichlet (prescribed pressure)
+    \item Outflow faces: Neumann (prescribed gradient allows natural outflow)
+    \item Requires gradient extraction during source simulation
+\end{itemize}
+
+See \cref{sec:pressure-coupled-bc} for detailed configuration.
+
+\subsubsection{Use \texttt{-inletOutletBC} (for quick tests)}
 
 The flux-based inlet-outlet BC naturally handles mass conservation:
 \begin{itemize}

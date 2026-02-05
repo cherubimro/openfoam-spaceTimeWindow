@@ -244,17 +244,21 @@ functions
 
 **Field Selection Strategy:**
 
-For unsteady turbulent flows with `-inletOutletBC`, the recommended approach is:
+For accurate reconstruction with pressure-coupled BC (recommended):
+
+```cpp
+fields          (U p);             // Both U and p for time-varying BC
+initialFields   (U p nut);         // All fields needed for solver startup
+extractGradients    true;
+gradientFields      (p);           // Extract normal gradient for pressure coupling
+```
+
+For quick tests with `-inletOutletBC` (not recommended for accurate reconstruction):
 
 ```cpp
 fields          (U);               // Only velocity needs time-varying BC data
 initialFields   (U p nut);         // All fields needed for solver startup
 ```
-
-This works because:
-- Velocity is the only field that needs prescribed values at inflow faces
-- Pressure and turbulence quantities use zeroGradient (no BC data needed)
-- Reduces storage by ~66% compared to extracting all fields
 
 **Output structure:**
 ```
@@ -294,7 +298,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 |------------------|--------------------------------------------------|----------|
 | -sourceCase      | Source case directory (where extraction ran)     | yes      |
 | -extractDir      | Directory with extracted data (default: cwd)     | no       |
-| -inletOutletBC   | **Recommended.** Use flux-based inlet-outlet BC for U, zeroGradient for scalars | no |
+| -inletOutletBC   | Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) | no |
 | -outletDirection | Create fixed outlet patch in given direction (e.g., "(1 0 0)") | no |
 | -outletFraction  | Fraction of box extent for outlet region (default: 0.1) | no |
 | -correctMassFlux | Apply least-squares mass flux correction to boundaryData | no |
@@ -478,14 +482,18 @@ Face interpolation during extraction can introduce small mass imbalances. Additi
 
 ### Solutions
 
-**1. Use `-inletOutletBC` (Recommended)**
+**1. Use Pressure-Coupled BC (Recommended)**
 
-The flux-based inlet-outlet BC naturally handles mass conservation:
+The `spaceTimeWindowCoupledPressure` BC combined with `spaceTimeWindow` for velocity naturally handles mass conservation through proper pressure coupling.
+
+**2. Use `-inletOutletBC` (For Quick Tests)**
+
+The flux-based inlet-outlet BC handles mass conservation:
 - Outflow faces use zeroGradient, allowing natural outflow
 - No artificial mass imbalance from prescribed outflow velocities
 - Works without any special mass correction
 
-**2. Use `-correctMassFlux`**
+**3. Use `-correctMassFlux`**
 
 Applies least-squares correction to boundaryData to ensure exact mass conservation:
 
@@ -498,7 +506,7 @@ The correction minimizes ||U_corrected - U||² subject to Σ(U_corrected · Sf) 
 U_corrected = U - (imbalance / totalSfMag) * n
 ```
 
-**3. Use `-outletDirection` with `fixesValue true`**
+**4. Use `-outletDirection` with `fixesValue true`**
 
 Creates an outlet patch where mass imbalance can escape:
 - `oldInternalFaces` uses `fixesValue true` (values not modified by adjustPhi)
@@ -506,12 +514,12 @@ Creates an outlet patch where mass imbalance can escape:
 
 ### Recommended Configurations
 
-| Use Case | Command | Notes |
+| Use Case | Command/Approach | Notes |
 |----------|---------|-------|
-| Unsteady turbulent (vortex shedding, etc.) | `-inletOutletBC` | **Recommended**. Natural mass balance. |
-| Unsteady turbulent + extra safety | `-inletOutletBC -correctMassFlux` | Ensures exact mass balance. |
+| Accurate reconstruction | Pressure-coupled BC | **Recommended**. Reproduces original flow. |
+| Quick tests | `-inletOutletBC` | Natural mass balance, may drift from source. |
 | Steady-mean flow direction | `-outletDirection "(1 0 0)"` | When outlet location is known. |
-| Maximum fidelity | `-correctMassFlux` (no outlet) | All faces prescribed, exact mass balance. |
+| Maximum fidelity | Pressure-coupled + `-correctMassFlux` | Best accuracy. |
 
 ## Boundary Data Compression
 

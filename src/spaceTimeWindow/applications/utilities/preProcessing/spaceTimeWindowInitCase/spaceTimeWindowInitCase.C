@@ -61,6 +61,7 @@ Usage
 #include "deltaVarintCodec.H"
 #include "deltaVarintTemporalCodec.H"
 #include "sodiumCrypto.H"
+#include "zstdWrapper.H"
 #include "multiDirRefinement.H"
 #include "cellShape.H"
 #include "cellModel.H"
@@ -97,7 +98,9 @@ void copyDirectory(const fileName& src, const fileName& dst)
 
 
 // Decrypt and decompress boundary data files
-// Returns the base field name (without .enc or .dvz.enc extensions)
+// Returns the base field name (without .enc extension layer)
+// For .dvz.zstd.enc -> strips .enc, writes .dvz.zstd (preserving zstd layer)
+// For .dvz.enc -> strips .enc, writes as plain OpenFOAM format (decompressing dvz)
 word decryptBoundaryFile
 (
     const fileName& encryptedPath,
@@ -110,12 +113,24 @@ word decryptBoundaryFile
     word fieldName = encryptedPath.name();
 
     // Determine file type from extension
-    // Possible patterns: fieldName.enc, fieldName.dvz.enc
+    // Possible patterns:
+    //   fieldName.enc
+    //   fieldName.dvz.enc
+    //   fieldName.dvz.zstd.enc
+    //   fieldName.dvzt.zstd.enc
     const word encExt = "." + sodiumCrypto::fileExtension;
     const word dvzExt = "." + deltaVarintCodec::fileExtension();
+    const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
+    const word zstdExt = "." + zstdWrapper::fileExtension;
+    const word dvzZstdEncExt = dvzExt + zstdExt + encExt;
+    const word dvztZstdEncExt = dvztExt + zstdExt + encExt;
     const word dvzEncExt = dvzExt + encExt;
+    const word dvztEncExt = dvztExt + encExt;
 
-    bool isDvzEnc = fieldName.ends_with(dvzEncExt);
+    bool isDvzZstdEnc = fieldName.ends_with(dvzZstdEncExt);
+    bool isDvztZstdEnc = fieldName.ends_with(dvztZstdEncExt);
+    bool isDvzEnc = !isDvzZstdEnc && fieldName.ends_with(dvzEncExt);
+    bool isDvztEnc = !isDvztZstdEnc && fieldName.ends_with(dvztEncExt);
     bool isEnc = fieldName.ends_with(encExt);
 
     if (!isEnc)
@@ -124,11 +139,27 @@ word decryptBoundaryFile
         return word::null;
     }
 
-    // Strip extensions to get base field name
+    // Determine base field name and output file name
     word baseFieldName;
-    if (isDvzEnc)
+    word outputFileName;  // What to write after stripping .enc
+
+    if (isDvzZstdEnc)
+    {
+        baseFieldName = fieldName.substr(0, fieldName.size() - dvzZstdEncExt.size());
+        outputFileName = baseFieldName + dvzExt + zstdExt;
+    }
+    else if (isDvztZstdEnc)
+    {
+        baseFieldName = fieldName.substr(0, fieldName.size() - dvztZstdEncExt.size());
+        outputFileName = baseFieldName + dvztExt + zstdExt;
+    }
+    else if (isDvzEnc)
     {
         baseFieldName = fieldName.substr(0, fieldName.size() - dvzEncExt.size());
+    }
+    else if (isDvztEnc)
+    {
+        baseFieldName = fieldName.substr(0, fieldName.size() - dvztEncExt.size());
     }
     else
     {
@@ -151,16 +182,38 @@ word decryptBoundaryFile
             << exit(FatalError);
     }
 
+    // For zstd-wrapped files, just write the raw decrypted data
+    // (it's still zstd-compressed codec data, which the BC reader handles)
+    if (isDvzZstdEnc || isDvztZstdEnc)
+    {
+        fileName outputPath = outputDir / outputFileName;
+        std::ofstream ofs(outputPath, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(decrypted.data()), decrypted.size());
+
+        if (verbose)
+        {
+            Info<< "    Decrypted: " << fieldName
+                << " -> " << outputFileName << endl;
+        }
+
+        rm(encryptedPath);
+        return baseFieldName;
+    }
+
     fileName outputPath = outputDir / baseFieldName;
 
-    if (isDvzEnc)
+    if (isDvzEnc || isDvztEnc)
     {
-        // Decrypted data is dvz-compressed - decompress and write as OpenFOAM format
-        // Detect if it's scalar or vector from the dvz header
-        if (deltaVarintCodec::isDeltaVarintBuffer(decrypted))
+        // Decrypted data is dvz/dvzt-compressed - decompress and write as OpenFOAM format
+        // Detect if it's scalar or vector from the codec header
+        bool validCodec = isDvzEnc
+            ? deltaVarintCodec::isDeltaVarintBuffer(decrypted)
+            : deltaVarintTemporalCodec::isDvztBuffer(decrypted);
+
+        if (validCodec)
         {
             // Read header to determine type
-            // DVZ format: magic(4) + nFaces(4) + nComponents(4) + precision(4) + data
+            // Format: magic(4) + nFaces(4) + nComponents(4) + precision(4) + data
             uint32_t nComponents = 0;
             if (decrypted.size() >= 12)
             {
@@ -170,7 +223,9 @@ word decryptBoundaryFile
             if (nComponents == 3)
             {
                 // Vector field
-                vectorField field = deltaVarintCodec::decodeVector(decrypted);
+                vectorField field = isDvzEnc
+                    ? deltaVarintCodec::decodeVector(decrypted)
+                    : deltaVarintTemporalCodec::decodeVector(decrypted);
 
                 OFstream os(outputPath);
                 os  << "FoamFile" << nl
@@ -192,7 +247,9 @@ word decryptBoundaryFile
             else
             {
                 // Scalar field
-                scalarField field = deltaVarintCodec::decodeScalar(decrypted);
+                scalarField field = isDvzEnc
+                    ? deltaVarintCodec::decodeScalar(decrypted)
+                    : deltaVarintTemporalCodec::decodeScalar(decrypted);
 
                 OFstream os(outputPath);
                 os  << "FoamFile" << nl
@@ -215,7 +272,7 @@ word decryptBoundaryFile
         else
         {
             FatalErrorInFunction
-                << "Decrypted data is not valid DVZ format: " << encryptedPath << nl
+                << "Decrypted data is not valid codec format: " << encryptedPath << nl
                 << exit(FatalError);
         }
     }
@@ -313,6 +370,9 @@ label convertDvztToDvzBoundaryData
 {
     const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
     const word dvzExt = "." + deltaVarintCodec::fileExtension();
+    const word zstdExt = "." + zstdWrapper::fileExtension;
+    const word dvztZstdExt = dvztExt + zstdExt;
+    const word dvzZstdExt = dvzExt + zstdExt;
     label totalConverted = 0;
 
     // Track previous timestep fields for each field name
@@ -335,37 +395,93 @@ label convertDvztToDvzBoundaryData
 
         for (const fileName& f : files)
         {
-            // Check if it's a DVZT file
-            if (!f.ends_with(dvztExt))
+            // Check if it's a DVZT file (with or without zstd)
+            bool isZstdWrapped = f.ends_with(dvztZstdExt);
+            bool isPlainDvzt = !isZstdWrapped && f.ends_with(dvztExt);
+
+            if (!isZstdWrapped && !isPlainDvzt)
             {
                 continue;
             }
 
-            // Get base field name (strip .dvzt extension)
-            word baseFieldName = f.substr(0, f.size() - dvztExt.size());
+            // Get base field name (strip .dvzt or .dvzt.zstd extension)
+            word baseFieldName;
+            if (isZstdWrapped)
+            {
+                baseFieldName = f.substr(0, f.size() - dvztZstdExt.size());
+            }
+            else
+            {
+                baseFieldName = f.substr(0, f.size() - dvztExt.size());
+            }
+
             fileName dvztPath = timeDir / f;
-            fileName dvzOutputPath = timeDir / (baseFieldName + dvzExt);
 
-            // Check if file is a keyframe or delta frame
-            bool isKeyframe = deltaVarintTemporalCodec::isKeyframe(dvztPath);
-
-            // Read the DVZT file to determine type (scalar or vector)
-            // Read header to get nComponents
-            std::ifstream ifs(dvztPath.c_str(), std::ios::binary);
-            if (!ifs)
+            // For zstd-wrapped files, decompress to get raw DVZT buffer
+            std::vector<uint8_t> dvztBuffer;
+            if (isZstdWrapped)
             {
-                WarningInFunction
-                    << "Cannot open DVZT file: " << dvztPath << endl;
-                continue;
+#ifdef FOAM_USE_ZSTD
+                dvztBuffer = zstdWrapper::decompressFromFile(dvztPath);
+#else
+                FatalErrorInFunction
+                    << "Cannot read zstd-compressed file - built without FOAM_USE_ZSTD" << nl
+                    << "    File: " << dvztPath << nl
+                    << exit(FatalError);
+#endif
             }
 
-            // Read header: magic(4) + nFaces(4) + nComponents(4) + precision(4) + flags(4)
-            uint32_t magic, nFaces, nComponents, precision, flags;
-            ifs.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-            ifs.read(reinterpret_cast<char*>(&nFaces), sizeof(nFaces));
-            ifs.read(reinterpret_cast<char*>(&nComponents), sizeof(nComponents));
-            ifs.read(reinterpret_cast<char*>(&precision), sizeof(precision));
-            ifs.close();
+            // Determine output format: if input was zstd, output as .dvz.zstd
+            word outputExt;
+            bool outputZstd = isZstdWrapped;
+            if (outputZstd)
+            {
+                outputExt = dvzZstdExt;
+            }
+            else
+            {
+                outputExt = dvzExt;
+            }
+            fileName dvzOutputPath = timeDir / (baseFieldName + outputExt);
+
+            // Read header to determine keyframe status and type
+            // For zstd-wrapped, use the decompressed buffer
+            uint32_t magic, nFaces, nComponents, precision;
+            bool isKeyframe;
+
+            if (isZstdWrapped)
+            {
+                if (dvztBuffer.size() < 20)
+                {
+                    WarningInFunction
+                        << "DVZT buffer too small: " << dvztPath << endl;
+                    continue;
+                }
+                std::memcpy(&magic, dvztBuffer.data(), sizeof(magic));
+                std::memcpy(&nFaces, dvztBuffer.data() + 4, sizeof(nFaces));
+                std::memcpy(&nComponents, dvztBuffer.data() + 8, sizeof(nComponents));
+                std::memcpy(&precision, dvztBuffer.data() + 12, sizeof(precision));
+                isKeyframe = deltaVarintTemporalCodec::isKeyframeBuffer(dvztBuffer);
+            }
+            else
+            {
+                isKeyframe = deltaVarintTemporalCodec::isKeyframe(dvztPath);
+
+                std::ifstream ifs(dvztPath.c_str(), std::ios::binary);
+                if (!ifs)
+                {
+                    WarningInFunction
+                        << "Cannot open DVZT file: " << dvztPath << endl;
+                    continue;
+                }
+
+                // Read header: magic(4) + nFaces(4) + nComponents(4) + precision(4)
+                ifs.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+                ifs.read(reinterpret_cast<char*>(&nFaces), sizeof(nFaces));
+                ifs.read(reinterpret_cast<char*>(&nComponents), sizeof(nComponents));
+                ifs.read(reinterpret_cast<char*>(&precision), sizeof(precision));
+                ifs.close();
+            }
 
             // Verify magic number
             if (magic != deltaVarintTemporalCodec::magic())
@@ -397,17 +513,35 @@ label convertDvztToDvzBoundaryData
                 }
 
                 // Decompress DVZT
-                vectorField field = deltaVarintTemporalCodec::readVector(dvztPath, prevPtr);
+                vectorField field;
+                if (isZstdWrapped)
+                {
+                    field = deltaVarintTemporalCodec::decodeVector(dvztBuffer, prevPtr);
+                }
+                else
+                {
+                    field = deltaVarintTemporalCodec::readVector(dvztPath, prevPtr);
+                }
 
                 // Store for next timestep
                 prevVectorFields.set(baseFieldName, field);
 
-                // Write as DVZ format
-                deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+                // Write as DVZ format (optionally zstd-compressed)
+                if (outputZstd)
+                {
+#ifdef FOAM_USE_ZSTD
+                    std::vector<uint8_t> dvzData = deltaVarintCodec::encode(field, outputPrecision);
+                    zstdWrapper::compressToFile(dvzOutputPath, dvzData);
+#endif
+                }
+                else
+                {
+                    deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+                }
 
                 if (verbose)
                 {
-                    Info<< "    Converted: " << f << " -> " << baseFieldName << dvzExt
+                    Info<< "    Converted: " << f << " -> " << baseFieldName << outputExt
                         << " (vector, " << field.size() << " values, "
                         << (isKeyframe ? "keyframe" : "delta") << ")" << endl;
                 }
@@ -431,17 +565,35 @@ label convertDvztToDvzBoundaryData
                 }
 
                 // Decompress DVZT
-                scalarField field = deltaVarintTemporalCodec::readScalar(dvztPath, prevPtr);
+                scalarField field;
+                if (isZstdWrapped)
+                {
+                    field = deltaVarintTemporalCodec::decodeScalar(dvztBuffer, prevPtr);
+                }
+                else
+                {
+                    field = deltaVarintTemporalCodec::readScalar(dvztPath, prevPtr);
+                }
 
                 // Store for next timestep
                 prevScalarFields.set(baseFieldName, field);
 
-                // Write as DVZ format
-                deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+                // Write as DVZ format (optionally zstd-compressed)
+                if (outputZstd)
+                {
+#ifdef FOAM_USE_ZSTD
+                    std::vector<uint8_t> dvzData = deltaVarintCodec::encode(field, outputPrecision);
+                    zstdWrapper::compressToFile(dvzOutputPath, dvzData);
+#endif
+                }
+                else
+                {
+                    deltaVarintCodec::write(dvzOutputPath, field, outputPrecision);
+                }
 
                 if (verbose)
                 {
-                    Info<< "    Converted: " << f << " -> " << baseFieldName << dvzExt
+                    Info<< "    Converted: " << f << " -> " << baseFieldName << outputExt
                         << " (scalar, " << field.size() << " values, "
                         << (isKeyframe ? "keyframe" : "delta") << ")" << endl;
                 }
@@ -1316,16 +1468,17 @@ int main(int argc, char *argv[])
 
     // Check for DVZT (delta-varint-temporal) compressed files and decompress them
     // DVZT files require sequential decompression because delta frames depend on previous timesteps
-    // Check by looking for .dvzt files in the first time directory
+    // Check by looking for .dvzt or .dvzt.zstd files in the first time directory
     {
         fileName firstTimeDir = patchBoundaryDir / timeList.first().second();
         fileNameList files = readDir(firstTimeDir, fileName::FILE);
         bool hasDvzt = false;
         const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
+        const word dvztZstdExt = dvztExt + "." + zstdWrapper::fileExtension;
 
         for (const fileName& f : files)
         {
-            if (f.ends_with(dvztExt))
+            if (f.ends_with(dvztZstdExt) || f.ends_with(dvztExt))
             {
                 hasDvzt = true;
                 break;
@@ -1336,6 +1489,7 @@ int main(int argc, char *argv[])
         {
             // Convert all DVZT files to DVZ (must be done sequentially in time order)
             // The resulting DVZ files are identical to what direct DVZ extraction produces
+            // If input was .dvzt.zstd, output will be .dvz.zstd
             convertDvztToDvzBoundaryData(patchBoundaryDir, timeList, 6, false);
         }
     }
@@ -1774,6 +1928,7 @@ int main(int argc, char *argv[])
                     fileNameList fieldFiles = readDir(timeDir, fileName::FILE);
 
                     const word dvzExt = "." + deltaVarintCodec::fileExtension();
+                    const word dvzZstdExt = dvzExt + "." + zstdWrapper::fileExtension;
 
                     for (const fileName& fieldFile : fieldFiles)
                     {
@@ -1784,6 +1939,71 @@ int main(int argc, char *argv[])
                         }
 
                         fileName fieldPath = timeDir / fieldFile;
+
+#ifdef FOAM_USE_ZSTD
+                        // Check if this is a .dvz.zstd file
+                        if (fieldFile.ends_with(dvzZstdExt))
+                        {
+                            std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(fieldPath);
+
+                            if (deltaVarintCodec::isDeltaVarintBuffer(buf))
+                            {
+                                uint32_t nComponents = 0;
+                                if (buf.size() >= 12)
+                                {
+                                    std::memcpy(&nComponents, buf.data() + 8, sizeof(uint32_t));
+                                }
+
+                                if (nComponents == 3)
+                                {
+                                    vectorField fullField = deltaVarintCodec::decodeVector(buf);
+
+                                    if (fullField.size() != nTotalBndFaces)
+                                    {
+                                        WarningInFunction
+                                            << "Field " << fieldFile << " has " << fullField.size()
+                                            << " values but expected " << nTotalBndFaces << nl
+                                            << "    Skipping..." << endl;
+                                        continue;
+                                    }
+
+                                    vectorField reducedField(inletFaceIndices.size());
+                                    forAll(inletFaceIndices, i)
+                                    {
+                                        reducedField[i] = fullField[inletFaceIndices[i]];
+                                    }
+
+                                    // Write back as .dvz.zstd
+                                    std::vector<uint8_t> dvzData = deltaVarintCodec::encode(reducedField);
+                                    zstdWrapper::compressToFile(fieldPath, dvzData);
+                                }
+                                else
+                                {
+                                    scalarField fullField = deltaVarintCodec::decodeScalar(buf);
+
+                                    if (fullField.size() != nTotalBndFaces)
+                                    {
+                                        WarningInFunction
+                                            << "Field " << fieldFile << " has " << fullField.size()
+                                            << " values but expected " << nTotalBndFaces << nl
+                                            << "    Skipping..." << endl;
+                                        continue;
+                                    }
+
+                                    scalarField reducedField(inletFaceIndices.size());
+                                    forAll(inletFaceIndices, i)
+                                    {
+                                        reducedField[i] = fullField[inletFaceIndices[i]];
+                                    }
+
+                                    // Write back as .dvz.zstd
+                                    std::vector<uint8_t> dvzData = deltaVarintCodec::encode(reducedField);
+                                    zstdWrapper::compressToFile(fieldPath, dvzData);
+                                }
+                            }
+                            continue;
+                        }
+#endif
 
                         // Check if this is a .dvz file (delta-varint compressed)
                         if (fieldFile.ends_with(dvzExt))
@@ -2056,11 +2276,23 @@ int main(int argc, char *argv[])
         {
             if (f != "points" && f != "extractionMetadata")
             {
-                // Strip compression extensions if present (.dvz or .dvzt)
+                // Strip compression extensions if present
+                // Longer extensions must match first (.dvz.zstd before .dvz)
                 word fieldName = f;
                 const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
                 const word dvzExt = "." + deltaVarintCodec::fileExtension();
-                if (fieldName.ends_with(dvztExt))
+                const word zstdExt = "." + zstdWrapper::fileExtension;
+                const word dvztZstdExt = dvztExt + zstdExt;
+                const word dvzZstdExt = dvzExt + zstdExt;
+                if (fieldName.ends_with(dvztZstdExt))
+                {
+                    fieldName = fieldName.substr(0, fieldName.size() - dvztZstdExt.size());
+                }
+                else if (fieldName.ends_with(dvzZstdExt))
+                {
+                    fieldName = fieldName.substr(0, fieldName.size() - dvzZstdExt.size());
+                }
+                else if (fieldName.ends_with(dvztExt))
                 {
                     fieldName = fieldName.substr(0, fieldName.size() - dvztExt.size());
                 }
@@ -2548,11 +2780,23 @@ int main(int argc, char *argv[])
     {
         if (f != "points" && f != "extractionMetadata")
         {
-            // Strip compression extensions if present (.dvz or .dvzt)
+            // Strip compression extensions if present
+            // Longer extensions must match first (.dvz.zstd before .dvz)
             word fieldName = f;
             const word dvztExt = "." + deltaVarintTemporalCodec::fileExtension();
             const word dvzExt = "." + deltaVarintCodec::fileExtension();
-            if (fieldName.ends_with(dvztExt))
+            const word zstdExt = "." + zstdWrapper::fileExtension;
+            const word dvztZstdExt = dvztExt + zstdExt;
+            const word dvzZstdExt = dvzExt + zstdExt;
+            if (fieldName.ends_with(dvztZstdExt))
+            {
+                fieldName = fieldName.substr(0, fieldName.size() - dvztZstdExt.size());
+            }
+            else if (fieldName.ends_with(dvzZstdExt))
+            {
+                fieldName = fieldName.substr(0, fieldName.size() - dvzZstdExt.size());
+            }
+            else if (fieldName.ends_with(dvztExt))
             {
                 fieldName = fieldName.substr(0, fieldName.size() - dvztExt.size());
             }

@@ -10,3 +10,8 @@ ifdef FOAM_USE_SODIUM
     EXE_INC += -DFOAM_USE_SODIUM
     LIB_LIBS += -lsodium
 endif
+
+ifdef FOAM_USE_ZSTD
+    EXE_INC += -DFOAM_USE_ZSTD
+    LIB_LIBS += -lzstd
+endif

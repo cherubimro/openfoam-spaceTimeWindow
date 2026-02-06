@@ -1,6 +1,7 @@
 codec/deltaVarintCodec.C
 codec/deltaVarintTemporalCodec.C
 codec/sodiumCrypto.C
+codec/zstdWrapper.C
 interpolation/spatialInterpolation2D/spatialInterpolation2D.C
 fvPatchFields/derived/spaceTimeWindowFvPatchField/spaceTimeWindowFvPatchFields.C
 fvPatchFields/derived/spaceTimeWindowInletOutletFvPatchField/spaceTimeWindowInletOutletFvPatchFields.C

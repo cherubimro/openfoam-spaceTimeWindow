@@ -19,6 +19,7 @@ License
 #include "token.H"
 #include "IOstreamOption.H"
 #include "deltaVarintCodec.H"
+#include "zstdWrapper.H"
 #include "pTraits.H"
 #include "volFields.H"
 #include "primitivePatchInterpolation.H"
@@ -83,6 +84,57 @@ Foam::Field<Type> Foam::spaceTimeWindowFvPatchField<Type>::readFieldData
       / this->patch().name()
       / timeDir.name()
     );
+
+#ifdef FOAM_USE_ZSTD
+    // Check for zstd-compressed delta-varint file (.dvz.zstd)
+    const fileName dvzZstdPath = baseDir / (fieldTableName_ + "."
+        + deltaVarintCodec::fileExtension() + "." + zstdWrapper::fileExtension);
+
+    if (isFile(dvzZstdPath))
+    {
+        std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(dvzZstdPath);
+        Field<Type> data;
+
+        if constexpr (std::is_same_v<Type, scalar>)
+        {
+            data = deltaVarintCodec::decodeScalar(buf);
+        }
+        else if constexpr (std::is_same_v<Type, vector>)
+        {
+            data = deltaVarintCodec::decodeVector(buf);
+        }
+        else
+        {
+            FatalErrorInFunction
+                << "Delta-varint codec only supports scalar and vector fields" << nl
+                << "    File: " << dvzZstdPath << nl
+                << "    Type: " << pTraits<Type>::typeName << nl
+                << exit(FatalError);
+        }
+
+        if (data.size() != this->patch().size())
+        {
+            initSpatialInterpolation();
+
+            if (spatialInterpPtr_.valid() && spatialInterpPtr_->needsInterpolation())
+            {
+                return spatialInterpPtr_->interpolate(data)();
+            }
+            else
+            {
+                FatalErrorInFunction
+                    << "Field size " << data.size()
+                    << " does not match patch size " << this->patch().size() << nl
+                    << "    File: " << dvzZstdPath << nl
+                    << "    Patch: " << this->patch().name() << nl
+                    << "    Spatial interpolation not available (missing points file?)" << nl
+                    << exit(FatalError);
+            }
+        }
+
+        return data;
+    }
+#endif
 
     // Check for delta-varint compressed file first (.dvz extension)
     const fileName dvzPath = baseDir / (fieldTableName_ + "." + deltaVarintCodec::fileExtension());

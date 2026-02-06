@@ -34,6 +34,7 @@ License
 #include "Time.H"
 #include "deltaVarintCodec.H"
 #include "deltaVarintTemporalCodec.H"
+#include "zstdWrapper.H"
 
 // * * * * * * * * * * * * * * Static Data Members * * * * * * * * * * * * * //
 
@@ -141,14 +142,34 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readPressureData
         return data;
     }
 
-    // 2. Delta-varint format (.dvz)
+#ifdef FOAM_USE_ZSTD
+    // 2a. Delta-varint + zstd format (.dvz.zstd)
+    filePath = dataPath / (pressureFieldName_ + "."
+        + deltaVarintCodec::fileExtension() + "." + zstdWrapper::fileExtension);
+    if (isFile(filePath))
+    {
+        std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(filePath);
+        return deltaVarintCodec::decodeScalar(buf);
+    }
+
+    // 2b. Delta-varint-temporal + zstd format (.dvzt.zstd)
+    filePath = dataPath / (pressureFieldName_ + "."
+        + deltaVarintTemporalCodec::fileExtension() + "." + zstdWrapper::fileExtension);
+    if (isFile(filePath))
+    {
+        std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(filePath);
+        return deltaVarintTemporalCodec::decodeScalar(buf);
+    }
+#endif
+
+    // 3. Delta-varint format (.dvz)
     filePath = dataPath / (pressureFieldName_ + "." + deltaVarintCodec::fileExtension());
     if (isFile(filePath))
     {
         return deltaVarintCodec::readScalar(filePath);
     }
 
-    // 3. Delta-varint-temporal format (.dvzt)
+    // 4. Delta-varint-temporal format (.dvzt)
     filePath = dataPath / (pressureFieldName_ + "." + deltaVarintTemporalCodec::fileExtension());
     if (isFile(filePath))
     {
@@ -158,6 +179,8 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readPressureData
     FatalErrorInFunction
         << "Cannot find pressure data file for time " << timeDir.name() << nl
         << "Searched for: " << pressureFieldName_ << ", "
+        << pressureFieldName_ + "." + deltaVarintCodec::fileExtension() + "." + zstdWrapper::fileExtension << ", "
+        << pressureFieldName_ + "." + deltaVarintTemporalCodec::fileExtension() + "." + zstdWrapper::fileExtension << ", "
         << pressureFieldName_ + "." + deltaVarintCodec::fileExtension() << ", "
         << pressureFieldName_ + "." + deltaVarintTemporalCodec::fileExtension() << nl
         << "in directory: " << dataPath << nl
@@ -203,14 +226,34 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readGradientData
         return data;
     }
 
-    // 2. Delta-varint format (.dvz)
+#ifdef FOAM_USE_ZSTD
+    // 2a. Delta-varint + zstd format (.dvz.zstd)
+    filePath = dataPath / (gradientFieldName_ + "."
+        + deltaVarintCodec::fileExtension() + "." + zstdWrapper::fileExtension);
+    if (isFile(filePath))
+    {
+        std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(filePath);
+        return deltaVarintCodec::decodeScalar(buf);
+    }
+
+    // 2b. Delta-varint-temporal + zstd format (.dvzt.zstd)
+    filePath = dataPath / (gradientFieldName_ + "."
+        + deltaVarintTemporalCodec::fileExtension() + "." + zstdWrapper::fileExtension);
+    if (isFile(filePath))
+    {
+        std::vector<uint8_t> buf = zstdWrapper::decompressFromFile(filePath);
+        return deltaVarintTemporalCodec::decodeScalar(buf);
+    }
+#endif
+
+    // 3. Delta-varint format (.dvz)
     filePath = dataPath / (gradientFieldName_ + "." + deltaVarintCodec::fileExtension());
     if (isFile(filePath))
     {
         return deltaVarintCodec::readScalar(filePath);
     }
 
-    // 3. Delta-varint-temporal format (.dvzt)
+    // 4. Delta-varint-temporal format (.dvzt)
     filePath = dataPath / (gradientFieldName_ + "." + deltaVarintTemporalCodec::fileExtension());
     if (isFile(filePath))
     {
@@ -220,6 +263,8 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readGradientData
     FatalErrorInFunction
         << "Cannot find gradient data file for time " << timeDir.name() << nl
         << "Searched for: " << gradientFieldName_ << ", "
+        << gradientFieldName_ + "." + deltaVarintCodec::fileExtension() + "." + zstdWrapper::fileExtension << ", "
+        << gradientFieldName_ + "." + deltaVarintTemporalCodec::fileExtension() + "." + zstdWrapper::fileExtension << ", "
         << gradientFieldName_ + "." + deltaVarintCodec::fileExtension() << ", "
         << gradientFieldName_ + "." + deltaVarintTemporalCodec::fileExtension() << nl
         << "in directory: " << dataPath << nl

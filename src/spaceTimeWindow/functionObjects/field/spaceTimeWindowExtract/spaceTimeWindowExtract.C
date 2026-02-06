@@ -32,6 +32,7 @@ License
 #include "deltaVarintCodec.H"
 #include "deltaVarintTemporalCodec.H"
 #include "sodiumCrypto.H"
+#include "zstdWrapper.H"
 #include <fstream>
 #include <type_traits>
 #include <cstring>
@@ -1681,22 +1682,27 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
                 prevPtr = &prevScalarFields_[fieldName];
             }
 
+            std::vector<uint8_t> data = deltaVarintTemporalCodec::encode(
+                field, prevPtr, isKeyframe, deltaVarintPrecision_);
+            word ext = deltaVarintTemporalCodec::fileExtension();
+
+#ifdef FOAM_USE_ZSTD
+            data = zstdWrapper::compress(data);
+            ext = ext + "." + zstdWrapper::fileExtension;
+#endif
+
 #ifdef FOAM_USE_SODIUM
             if (useEncryption_)
             {
-                std::vector<uint8_t> compressed = deltaVarintTemporalCodec::encode(
-                    field, prevPtr, isKeyframe, deltaVarintPrecision_);
-                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
-                fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
-                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
-
-                // Store current field for next timestep
+                fileName outPath = dir / (fieldName + "." + ext + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, data, publicKeyBase64_);
                 prevScalarFields_.set(fieldName, field);
                 return;
             }
 #endif
-            fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension());
-            deltaVarintTemporalCodec::write(outPath, field, prevPtr, isKeyframe, deltaVarintPrecision_);
+            fileName outPath = dir / (fieldName + "." + ext);
+            std::ofstream ofs(outPath, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
 
             // Store current field for next timestep
             prevScalarFields_.set(fieldName, field);
@@ -1710,21 +1716,27 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
                 prevPtr = &prevVectorFields_[fieldName];
             }
 
+            std::vector<uint8_t> data = deltaVarintTemporalCodec::encode(
+                field, prevPtr, isKeyframe, deltaVarintPrecision_);
+            word ext = deltaVarintTemporalCodec::fileExtension();
+
+#ifdef FOAM_USE_ZSTD
+            data = zstdWrapper::compress(data);
+            ext = ext + "." + zstdWrapper::fileExtension;
+#endif
+
 #ifdef FOAM_USE_SODIUM
             if (useEncryption_)
             {
-                std::vector<uint8_t> compressed = deltaVarintTemporalCodec::encode(
-                    field, prevPtr, isKeyframe, deltaVarintPrecision_);
-                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
-                fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
-                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
-
+                fileName outPath = dir / (fieldName + "." + ext + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, data, publicKeyBase64_);
                 prevVectorFields_.set(fieldName, field);
                 return;
             }
 #endif
-            fileName outPath = dir / (fieldName + "." + deltaVarintTemporalCodec::fileExtension());
-            deltaVarintTemporalCodec::write(outPath, field, prevPtr, isKeyframe, deltaVarintPrecision_);
+            fileName outPath = dir / (fieldName + "." + ext);
+            std::ofstream ofs(outPath, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
 
             prevVectorFields_.set(fieldName, field);
             return;
@@ -1737,40 +1749,48 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeField
     {
         if constexpr (std::is_same_v<Type, scalar>)
         {
+            std::vector<uint8_t> data = deltaVarintCodec::encode(field, deltaVarintPrecision_);
+            word ext = deltaVarintCodec::fileExtension();
+
+#ifdef FOAM_USE_ZSTD
+            data = zstdWrapper::compress(data);
+            ext = ext + "." + zstdWrapper::fileExtension;
+#endif
+
 #ifdef FOAM_USE_SODIUM
             if (useEncryption_)
             {
-                // Compress to buffer, then encrypt
-                std::vector<uint8_t> compressed = deltaVarintCodec::encode(field, deltaVarintPrecision_);
-                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
-
-                // Write encrypted file with .dvz.enc extension
-                fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
-                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+                fileName outPath = dir / (fieldName + "." + ext + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, data, publicKeyBase64_);
                 return;
             }
 #endif
-            fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
-            deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
+            fileName outPath = dir / (fieldName + "." + ext);
+            std::ofstream ofs(outPath, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
             return;
         }
         else if constexpr (std::is_same_v<Type, vector>)
         {
+            std::vector<uint8_t> data = deltaVarintCodec::encode(field, deltaVarintPrecision_);
+            word ext = deltaVarintCodec::fileExtension();
+
+#ifdef FOAM_USE_ZSTD
+            data = zstdWrapper::compress(data);
+            ext = ext + "." + zstdWrapper::fileExtension;
+#endif
+
 #ifdef FOAM_USE_SODIUM
             if (useEncryption_)
             {
-                // Compress to buffer, then encrypt
-                std::vector<uint8_t> compressed = deltaVarintCodec::encode(field, deltaVarintPrecision_);
-                std::vector<uint8_t> publicKey = sodiumCrypto::fromBase64(publicKeyBase64_);
-
-                // Write encrypted file with .dvz.enc extension
-                fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension() + "." + sodiumCrypto::fileExtension);
-                sodiumCrypto::encryptToFile(outPath, compressed, publicKey);
+                fileName outPath = dir / (fieldName + "." + ext + "." + sodiumCrypto::fileExtension);
+                sodiumCrypto::encryptToFile(outPath, data, publicKeyBase64_);
                 return;
             }
 #endif
-            fileName outPath = dir / (fieldName + "." + deltaVarintCodec::fileExtension());
-            deltaVarintCodec::write(outPath, field, deltaVarintPrecision_);
+            fileName outPath = dir / (fieldName + "." + ext);
+            std::ofstream ofs(outPath, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
             return;
         }
         // For other types, fall through to standard format

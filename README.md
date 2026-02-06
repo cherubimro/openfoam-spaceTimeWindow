@@ -292,7 +292,7 @@ outputDir/
                 points              # Face centres (reference only)
                 extractionMetadata  # Settings and timestep list
                 <time>/
-                    U               # Face-interpolated velocity (or U.dvz)
+                    U               # or U.dvz, U.dvz.zstd, U.dvzt.zstd, U.dvz.enc, U.dvz.zstd.enc
     <startTime>/                # Initial subset fields (always ASCII)
         U
         p
@@ -560,7 +560,9 @@ The `writeFormat` parameter controls how boundary data files are written.
 | `ascii` + gzip | .gz | ~10% | `writeCompression on` |
 | `binary` + gzip | .gz | ~8% | Combined |
 | `deltaVarint` | .dvz | **~2.7%** | High compression, self-contained |
+| `deltaVarint` + zstd | .dvz.zstd | **~0.4%** | Integrated zstd (auto if libzstd present) |
 | `dvzt` | .dvzt | **~2.4%** | Best compression, recommended |
+| `dvzt` + zstd | .dvzt.zstd | **~0.3%** | Best compression + integrated zstd |
 
 ### Delta-Varint Codec (DVZ)
 
@@ -581,6 +583,19 @@ writeFormat     deltaVarint;
 deltaVarintPrecision  6;    // ~1e-6 relative precision
 ```
 
+### Integrated Zstd Compression (Optional)
+
+When built with libzstd support (auto-detected by `./Allwmake`), DVZ and DVZT data is automatically wrapped with zstd level-3 compression before writing to disk. This is applied transparently as a compression layer:
+
+```
+Encoding pipeline:  codec encode → zstd compress → [optional encrypt] → write
+Extension stacking: fieldName.dvz.zstd  or  fieldName.dvzt.zstd  or  fieldName.dvz.zstd.enc
+```
+
+The zstd layer provides an additional ~10x reduction on top of the already-compact varint encoding, bringing typical file sizes to ~0.3-0.4% of uncompressed ASCII. Decompression is transparent at runtime - the boundary conditions automatically detect and decompress `.zstd` files.
+
+**No configuration needed**: zstd compression is applied automatically when the library is built with libzstd. Files without `.zstd` extension (from older builds) remain fully readable for backward compatibility.
+
 ### Delta-Varint-Temporal Codec (DVZT)
 
 Enhanced codec that exploits both spatial and temporal correlation for better compression:
@@ -599,16 +614,16 @@ dvztKeyframeInterval  20;       // Keyframe every 20 timesteps (default)
 
 **DVZT Workflow:**
 
-During extraction, DVZT writes smaller .dvzt files. During case initialization, `spaceTimeWindowInitCase` automatically converts .dvzt files to .dvz format (required because delta frames need sequential processing). The resulting .dvz files are read by the spaceTimeWindow BC at runtime.
+During extraction, DVZT writes smaller .dvzt files (or .dvzt.zstd with integrated zstd). During case initialization, `spaceTimeWindowInitCase` automatically converts .dvzt files to .dvz format (required because delta frames need sequential processing). The zstd layer is preserved through the conversion. The resulting .dvz (or .dvz.zstd) files are read by the spaceTimeWindow BC at runtime.
 
 ```
-Extraction:  sim.dvzt files (~10% smaller than .dvz)
+Extraction:  .dvzt.zstd files (with zstd) or .dvzt files (without)
      |
      v
-spaceTimeWindowInitCase:  Converts .dvzt -> .dvz (sequential)
+spaceTimeWindowInitCase:  Converts .dvzt.zstd -> .dvz.zstd  (or .dvzt -> .dvz)
      |
      v
-Runtime:  Reads .dvz files (no changes to BC code)
+Runtime:  Reads .dvz.zstd or .dvz files (auto-detected by BC)
 ```
 
 **When to use DVZT:**
@@ -637,7 +652,7 @@ With very small Δt, most temporal residuals quantize to near-zero values, requi
 
 ## Encryption (Optional)
 
-Boundary data can be encrypted using X25519 asymmetric encryption (libsodium sealed boxes).
+Boundary data can be encrypted using X25519 asymmetric encryption (libsodium sealed boxes). When both zstd and encryption are enabled, the extension stacking is `fieldName.dvz.zstd.enc` (or `.dvzt.zstd.enc`). During case initialization, decryption strips the `.enc` extension, leaving the zstd-compressed file for the BC to read.
 
 ### Building with Encryption Support
 
@@ -717,11 +732,13 @@ This minimal dataset (typically a few gigabytes) can be stored on:
 
 ```bash
 # Build everything (library + utilities)
-./Allwmake
-
-# Or with encryption support (auto-detects libsodium)
+# Auto-detects libzstd (compression) and libsodium (encryption)
 ./Allwmake
 ```
+
+Optional dependencies are auto-detected by `./Allwmake`:
+- **libzstd**: Enables integrated zstd compression of DVZ/DVZT files (~10x additional reduction)
+- **libsodium**: Enables X25519 encryption of boundary data
 
 ### Manual Build
 
@@ -733,6 +750,12 @@ wmake
 # Build utilities
 cd applications/utilities/preProcessing/spaceTimeWindowInitCase
 wmake
+```
+
+For manual builds with optional features, export the flags before `wmake`:
+```bash
+export FOAM_USE_ZSTD=1    # if libzstd is installed
+export FOAM_USE_SODIUM=1  # if libsodium is installed
 ```
 
 ## Documentation
@@ -747,7 +770,8 @@ API documentation can be generated with Doxygen:
 
 - **OpenFOAM v2512** (openfoam.com) or compatible ESI-OpenCFD version
 - For parallel extraction: MPI environment
-- For encryption: libsodium development package
+- For integrated zstd compression: libzstd development package (libzstd-dev or libzstd-devel)
+- For encryption: libsodium development package (libsodium-dev or libsodium-devel)
 
 ## Example Case
 
@@ -807,6 +831,8 @@ Initial fields are also interpolated when mesh resolution changes:
 **Note:** Spatial interpolation introduces smoothing, particularly for coarsening. For turbulent flows, this may affect small-scale structures. Consider the trade-off between computational cost and resolution fidelity.
 
 ## External Compression Benchmark
+
+> **Note:** With integrated zstd compression (built with libzstd), boundary data is automatically compressed with zstd -3 on the fly. The benchmarks below show what is achievable with *external* tools on *uncompressed* DVZ/DVZT files. When integrated zstd is enabled, the files are already zstd-compressed, so applying external zstd again provides no benefit. However, external tools like 7z LZMA2 can still achieve better ratios for archival.
 
 DVZ and DVZT files can be further compressed using external tools for archival or transfer. The following benchmarks compare various compression algorithms on real boundary data files.
 
@@ -889,7 +915,7 @@ The compression results for DVZ files are shown in the DVZ Files Compression Res
 
 | Use Case | Method | Ratio | Speed | Command |
 |----------|--------|-------|-------|---------|
-| **Runtime (CFD)** | zstd -3 | ~10% | 300-400 MB/s | `zstd -3 file.dvz` |
+| **Runtime (CFD)** | Integrated zstd | ~10% | Automatic | Build with libzstd (recommended) |
 | **Archive/Transfer** | 7z lzma2 -mx9 | ~6% | 10-11 MB/s | `7z a -m0=lzma2 -mx=9 archive.7z *.dvz` |
 | **Real-time streaming** | lz4 | ~14-18% | 600-800 MB/s | `lz4 file.dvz` |
 | **Quick compression** | zstd -1 | ~10-14% | 500-600 MB/s | `zstd -1 file.dvz` |
@@ -908,10 +934,10 @@ The compression results for DVZ files are shown in the DVZ Files Compression Res
 ```bash
 # Archive all boundary data with best compression
 cd subset-case/constant/boundaryData/oldInternalFaces
-7z a -m0=lzma2 -mx=9 ../boundaryData.7z */U.dvz */U.dvzt
+7z a -m0=lzma2 -mx=9 ../boundaryData.7z */*.dvz */*.dvz.zstd */*.dvzt */*.dvzt.zstd
 
-# Or with zstd for faster compression
-tar -cf - */U.dvz */U.dvzt | zstd -3 > ../boundaryData.tar.zst
+# Or with tar for faster archival (already zstd-compressed if built with libzstd)
+tar -cf ../boundaryData.tar */*.dvz.zstd
 ```
 
 ## Limitations

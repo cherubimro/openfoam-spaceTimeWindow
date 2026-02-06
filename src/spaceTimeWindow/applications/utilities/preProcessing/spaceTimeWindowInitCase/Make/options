@@ -8,6 +8,10 @@ ifdef FOAM_USE_SODIUM
     EXE_INC += -DFOAM_USE_SODIUM
 endif
 
+ifdef FOAM_USE_ZSTD
+    EXE_INC += -DFOAM_USE_ZSTD
+endif
+
 EXE_LIBS = \
     -lfiniteVolume \
     -lmeshTools \
@@ -17,4 +21,8 @@ EXE_LIBS = \
 
 ifdef FOAM_USE_SODIUM
     EXE_LIBS += -lsodium
+endif
+
+ifdef FOAM_USE_ZSTD
+    EXE_LIBS += -lzstd
 endif

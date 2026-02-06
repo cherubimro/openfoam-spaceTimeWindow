@@ -316,8 +316,9 @@
 % Feature highlights
 \begin{tikzpicture}
     \node[text width=12cm, align=center, font=\normalsize\color{bodytext}] {
-        \textbf{\color{primaryblue}Boundary Data Extraction} ~$\bullet$~
+        \textbf{\color{primaryblue}Boundary Data Extraction and Flow Recalculation} ~$\bullet$~
         \textbf{\color{secondarygreen}Time Interpolation} ~$\bullet$~
+        \textbf{\color{warningorange}Integrated Zstd Compression} ~$\bullet$~
         \textbf{\color{accentpurple}Optional Encryption}
     };
 \end{tikzpicture}
@@ -434,7 +435,8 @@ The \texttt{spaceTimeWindow} library enables extraction and reconstruction of sp
 
 \begin{itemize}
     \item Extract a region of interest from a full-domain simulation
-    \item Store time-varying boundary conditions efficiently
+    \item Store time-varying boundary conditions efficiently with compact codecs (DVZ/DVZT)
+    \item Optionally apply integrated zstd compression for additional $\sim$10$\times$ size reduction
     \item Reconstruct the flow within the subset using pre-computed boundary data
     \item Optionally encrypt boundary data for secure distribution
 \end{itemize}
@@ -453,7 +455,8 @@ The library consists of four main components:
 \begin{itemize}
     \item OpenFOAM v2512 (openfoam.com) or compatible ESI-OpenCFD version
     \item C++17 compatible compiler (GCC 7+ or Clang 5+)
-    \item Optional: libsodium for encryption support
+    \item Optional: libzstd for integrated zstd compression (libzstd-dev or libzstd-devel)
+    \item Optional: libsodium for encryption support (libsodium-dev or libsodium-devel)
     \item Optional: MPI for parallel execution
 \end{itemize}
 
@@ -467,20 +470,24 @@ The library consists of four main components:
 cd openfoam-spaceTimeWindow
 
 # Build library and utilities
+# Auto-detects libzstd (compression) and libsodium (encryption)
 ./Allwmake
-
-# Or with encryption support (requires libsodium)
-./Allwmake  # Auto-detects libsodium if installed
 \end{lstlisting}
 
-For manual building with encryption:
+Optional dependencies are auto-detected by \texttt{./Allwmake}:
+\begin{itemize}
+    \item \textbf{libzstd}: Enables integrated zstd compression of DVZ/DVZT files ($\sim$10$\times$ additional reduction)
+    \item \textbf{libsodium}: Enables X25519 encryption of boundary data
+\end{itemize}
 
-\begin{lstlisting}[language=bash,caption={Manual build with encryption}]
+For manual building with optional features:
+
+\begin{lstlisting}[language=bash,caption={Manual build with optional features}]
 cd src/spaceTimeWindow
-export FOAM_USE_SODIUM=1 && wmake
+export FOAM_USE_ZSTD=1 FOAM_USE_SODIUM=1 && wmake
 
 cd applications/utilities/preProcessing/spaceTimeWindowInitCase
-export FOAM_USE_SODIUM=1 && wmake
+export FOAM_USE_ZSTD=1 FOAM_USE_SODIUM=1 && wmake
 
 cd ../spaceTimeWindowKeygen
 export FOAM_USE_SODIUM=1 && wmake
@@ -891,7 +898,7 @@ In parallel mode, the extraction process operates as follows:
     % === OUTPUT FILE ===
     \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight,
           minimum height=1.2cm, minimum width=2cm, aspect=0.25, line width=1.5pt] (file) at (10,0.5) {};
-    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {U,p,gradp.dvz};
+    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {U,p,gradp.dvz[.zstd]};
 
     % Arrow from merged to file
     \draw[arrow, secondarygreen, line width=2pt] (4.5,0.5) -- node[above, font=\sffamily\footnotesize] {write} (8,0.5);
@@ -1012,10 +1019,10 @@ The extracted data consists of two distinct components, illustrated in \cref{fig
 
     % Note about compression
     \node[anchor=north west, font=\sffamily\footnotesize, text width=12cm, bodytext] at (0,-3.8) {
-        $\rightarrow$ Boundary data dominates storage. Use \texttt{dvzt} format for 30--50$\times$ compression.
+        $\rightarrow$ Boundary data dominates storage. Use \texttt{dvzt} format with integrated zstd for 300$\times$+ compression.
     };
 \end{tikzpicture}
-\caption{Data storage structure: Initial fields are written once at $t_0$, while boundary data is accumulated at every timestep. Compression is critical for the boundary data component.}
+\caption{Data storage structure: Initial fields are written once at $t_0$, while boundary data is accumulated at every timestep. Compression (DVZ/DVZT + integrated zstd) is critical for the boundary data component.}
 \label{fig:data-storage}
 \end{figure}
 
@@ -1042,7 +1049,7 @@ The boundary data provides the time-varying boundary conditions:
 \end{itemize}
 
 \begin{warningbox}
-Boundary data accumulates rapidly during long simulations. For a typical LES with $10^4$ boundary faces and $10^4$ timesteps, uncompressed ASCII data can reach tens of gigabytes. The \texttt{dvzt} compression format reduces this by 30--50$\times$.
+Boundary data accumulates rapidly during long simulations. For a typical LES with $10^4$ boundary faces and $10^4$ timesteps, uncompressed ASCII data can reach tens of gigabytes. The \texttt{dvzt} compression format reduces this by 30--50$\times$, and with integrated zstd compression the reduction reaches 300$\times$+.
 \end{warningbox}
 
 \subsection{Why Reconstruction Works}
@@ -1112,8 +1119,8 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
     };
 
     % Files in boundaryData
-    \node[smallbox, fill=white, draw=warningorange] at (0,6.8) {U.dvz (velocity)};
-    \node[smallbox, fill=white, draw=primaryblue] at (0,6.1) {p.dvz, gradp.dvz};
+    \node[smallbox, fill=white, draw=warningorange] at (0,6.8) {U.dvz[.zstd] (velocity)};
+    \node[smallbox, fill=white, draw=primaryblue] at (0,6.1) {p.dvz[.zstd], gradp.dvz[.zstd]};
     \node[smallbox, fill=white, draw=gray!50] at (0,5.4) {points, metadata};
 
     % === ANALYSIS STEP ===
@@ -1467,7 +1474,7 @@ functions
 }
 \end{lstlisting}
 
-Encrypted files have the \texttt{.enc} extension (e.g., \texttt{U.dvz.enc} for compressed and encrypted data).
+Encrypted files have the \texttt{.enc} extension appended to the codec extension (e.g., \texttt{U.dvz.enc}, or \texttt{U.dvz.zstd.enc} when integrated zstd compression is also enabled).
 
 \subsection{Decryption During Case Initialization}
 
@@ -1578,7 +1585,7 @@ The spaceTimeWindow approach offers an additional security benefit: by storing o
 The reconstruction case contains only:
 \begin{itemize}
     \item The subset mesh (\texttt{constant/polyMesh})
-    \item Encrypted boundary data (\texttt{constant/boundaryData/*.enc})
+    \item Encrypted boundary data (\texttt{constant/boundaryData/*.zstd.enc} or \texttt{*.enc})
     \item Initial fields for one timestep
     \item Configuration dictionaries
 \end{itemize}
@@ -2626,7 +2633,7 @@ outputDir/
                 points              # Face centres
                 extractionMetadata  # Settings and timestep list
                 0.0001/
-                    U               # or U.dvz or U.dvz.enc
+                    U               # or U.dvz, U.dvz.zstd, U.dvz.zstd.enc
                     p               # pressure (for coupled BC)
                     gradp           # pressure gradient (for coupled BC)
                 0.0002/
@@ -2654,7 +2661,9 @@ Binary & (none) & $\sim$50\% & OpenFOAM native \\
 ASCII + gzip & .gz & $\sim$10\% & Compressed \\
 Binary + gzip & .gz & $\sim$8\% & Compressed \\
 deltaVarint & .dvz & $\sim$2.7\% & High compression, self-contained \\
+deltaVarint + zstd & .dvz.zstd & $\sim$0.4\% & Integrated zstd (auto if libzstd) \\
 dvzt & .dvzt & $\sim$2.4\% & Best compression, recommended \\
+dvzt + zstd & .dvzt.zstd & $\sim$0.3\% & Best compression + integrated zstd \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -2959,14 +2968,14 @@ Enhanced codec that exploits both spatial and temporal correlation for better co
     % Extraction phase
     \draw[primaryblue, thick, fill=primarylight, rounded corners=4pt] (0,4) rectangle (3.5,5);
     \node[font=\small\sffamily\bfseries, color=primarydark] at (1.75,4.5) {Extraction};
-    \node[font=\tiny\sffamily, color=bodytext] at (1.75,4.2) {writes .dvzt files};
+    \node[font=\tiny\sffamily, color=bodytext] at (1.75,4.2) {writes .dvzt[.zstd] files};
 
     % Arrow
     \draw[-{Stealth[length=3mm]}, thick, warningorange] (3.7,4.5) -- (4.8,4.5);
 
     % DVZT files
     \draw[accentpurple, thick, fill=accentlight, rounded corners=4pt] (5,4) rectangle (7.5,5);
-    \node[font=\small\sffamily\bfseries, color=accentpurple] at (6.25,4.65) {.dvzt};
+    \node[font=\small\sffamily\bfseries, color=accentpurple] at (6.25,4.65) {.dvzt[.zstd]};
     \node[font=\tiny\sffamily, color=bodytext] at (6.25,4.25) {compact storage};
 
     % Arrow
@@ -2975,14 +2984,14 @@ Enhanced codec that exploits both spatial and temporal correlation for better co
     % InitCase
     \draw[secondarygreen, thick, fill=secondarylight, rounded corners=4pt] (9,4) rectangle (12.5,5);
     \node[font=\small\sffamily\bfseries, color=secondarygreen] at (10.75,4.65) {spaceTimeWindowInitCase};
-    \node[font=\tiny\sffamily, color=bodytext] at (10.75,4.25) {converts to .dvz};
+    \node[font=\tiny\sffamily, color=bodytext] at (10.75,4.25) {converts to .dvz[.zstd]};
 
     % Arrow down
     \draw[-{Stealth[length=3mm]}, thick, warningorange] (10.75,3.8) -- (10.75,3.2);
 
     % DVZ files
     \draw[primaryblue, thick, fill=primarylight, rounded corners=4pt] (9,2.2) rectangle (12.5,3);
-    \node[font=\small\sffamily\bfseries, color=primarydark] at (10.75,2.85) {.dvz};
+    \node[font=\small\sffamily\bfseries, color=primarydark] at (10.75,2.85) {.dvz[.zstd]};
     \node[font=\tiny\sffamily, color=bodytext] at (10.75,2.45) {self-contained timesteps};
 
     % Arrow
@@ -2994,9 +3003,9 @@ Enhanced codec that exploits both spatial and temporal correlation for better co
     \node[font=\tiny\sffamily, color=bodytext] at (6.25,2.45) {random access};
 
     % Notes
-    \node[font=\scriptsize\sffamily, color=bodytext, align=center] at (6.25,1.5) {Delta frames require sequential decoding\\$\Rightarrow$ converted to DVZ before runtime};
+    \node[font=\scriptsize\sffamily, color=bodytext, align=center] at (6.25,1.5) {Delta frames require sequential decoding\\$\Rightarrow$ converted to DVZ[.zstd] before runtime};
 \end{tikzpicture}
-\caption{DVZT workflow: extraction writes compact .dvzt files. Before reconstruction, spaceTimeWindowInitCase converts them to .dvz format (required for random timestep access at runtime)}
+\caption{DVZT workflow: extraction writes compact .dvzt[.zstd] files. Before reconstruction, spaceTimeWindowInitCase converts them to .dvz[.zstd] format (required for random timestep access at runtime). The zstd compression layer is preserved through the conversion}
 \label{fig:dvzt-workflow}
 \end{figure}
 
@@ -3079,10 +3088,10 @@ Random access requires decoding from the nearest preceding keyframe. For this re
 
 \textbf{DVZT Workflow:}
 
-During extraction, DVZT writes smaller \texttt{.dvzt} files. During case initialization, the utility automatically converts \texttt{.dvzt} to \texttt{.dvz} format (required because delta frames need sequential processing). The resulting \texttt{.dvz} files are read by the spaceTimeWindow BC at runtime.
+During extraction, DVZT writes smaller \texttt{.dvzt} files (or \texttt{.dvzt.zstd} with integrated zstd). During case initialization, the utility automatically converts DVZT to DVZ format (required because delta frames need sequential processing). The zstd layer is preserved through the conversion. The resulting \texttt{.dvz} (or \texttt{.dvz.zstd}) files are read by the spaceTimeWindow BC at runtime.
 
 \begin{center}
-Extraction $\rightarrow$ \texttt{.dvzt} files ($\sim$10\% smaller) $\rightarrow$ \texttt{spaceTimeWindowInitCase} $\rightarrow$ \texttt{.dvz} files $\rightarrow$ Runtime
+Extraction $\rightarrow$ \texttt{.dvzt[.zstd]} files $\rightarrow$ \texttt{spaceTimeWindowInitCase} $\rightarrow$ \texttt{.dvz[.zstd]} files $\rightarrow$ Runtime
 \end{center}
 
 \textbf{When to use DVZT:}
@@ -3120,7 +3129,40 @@ $10^{-6}$ & Very strong & $\sim$30--50\% smaller \\
     \item Large timesteps where temporal correlation is weak
 \end{itemize}
 
+\subsubsection{Integrated Zstd Compression}
+\label{sec:zstd}
+
+When built with libzstd support (auto-detected by \texttt{./Allwmake}), DVZ and DVZT data is automatically wrapped with zstd level-3 compression before writing to disk. This is applied transparently as a compression layer in the encoding pipeline:
+
+\begin{center}
+codec encode $\rightarrow$ zstd compress $\rightarrow$ [optional encrypt] $\rightarrow$ write to disk
+\end{center}
+
+\textbf{Extension stacking:}
+\begin{itemize}
+    \item \texttt{fieldName.dvz.zstd} --- DVZ with integrated zstd
+    \item \texttt{fieldName.dvzt.zstd} --- DVZT with integrated zstd
+    \item \texttt{fieldName.dvz.zstd.enc} --- DVZ + zstd + encryption
+    \item \texttt{fieldName.dvzt.zstd.enc} --- DVZT + zstd + encryption
+\end{itemize}
+
+The zstd layer provides an additional $\sim$10$\times$ reduction on top of the already-compact varint encoding, bringing typical file sizes to $\sim$0.3--0.4\% of uncompressed ASCII. Decompression is transparent at runtime---the boundary conditions automatically detect and decompress \texttt{.zstd} files.
+
+\begin{notebox}
+No configuration is needed: zstd compression is applied automatically when the library is built with libzstd. Files without the \texttt{.zstd} extension (from older builds or builds without libzstd) remain fully readable for backward compatibility.
+\end{notebox}
+
+The DVZT workflow with integrated zstd becomes:
+
+\begin{center}
+\texttt{.dvzt.zstd} files $\rightarrow$ \texttt{spaceTimeWindowInitCase} $\rightarrow$ \texttt{.dvz.zstd} files $\rightarrow$ Runtime
+\end{center}
+
 \subsubsection{External Compression Benchmark}
+
+\begin{notebox}
+With integrated zstd compression (built with libzstd), boundary data is already compressed on the fly with zstd -3. The benchmarks below show what is achievable with \emph{external} tools on \emph{uncompressed} DVZ/DVZT files. For archival of already zstd-compressed files, use 7z LZMA2 for additional gains.
+\end{notebox}
 
 DVZ and DVZT files can be further compressed using external tools for archival or transfer. The following benchmarks compare various compression algorithms on real boundary data files.
 
@@ -3196,7 +3238,7 @@ lz4 & 4.1~MB & 13.56\% & 763.0~MB/s & Fastest \\
 
 \textbf{Recommendations:}
 \begin{itemize}
-    \item \textbf{Runtime/on-the-fly}: zstd -3 ($\sim$10\% ratio, 300--400~MB/s)
+    \item \textbf{Runtime/on-the-fly}: Use integrated zstd (build with libzstd, automatic)
     \item \textbf{Archive/transfer}: 7z lzma2 -mx9 or xz -6 ($\sim$6\% ratio, 10~MB/s)
     \item \textbf{Real-time streaming}: lz4 ($\sim$14--18\% ratio, 600--800~MB/s)
 \end{itemize}
@@ -3204,10 +3246,10 @@ lz4 & 4.1~MB & 13.56\% & 763.0~MB/s & Fastest \\
 \begin{lstlisting}[language=bash,caption={Archival compression example}]
 # Archive with best compression (7z)
 cd subset-case/constant/boundaryData/oldInternalFaces
-7z a -m0=lzma2 -mx=9 ../boundaryData.7z */*.dvz */*.dvzt
+7z a -m0=lzma2 -mx=9 ../boundaryData.7z */*.dvz.zstd */*.dvz */*.dvzt.zstd */*.dvzt
 
-# Or with zstd for faster compression
-tar -cf - */*.dvz */*.dvzt | zstd -3 > ../boundaryData.tar.zst
+# Or with tar (files already zstd-compressed if built with libzstd)
+tar -cf ../boundaryData.tar */*.dvz.zstd
 \end{lstlisting}
 
 \subsection{Extraction Metadata}
@@ -3960,7 +4002,7 @@ Symptoms: Pressure residuals increase, NaN values appear.
 
 \begin{lstlisting}[caption={Decryption failure}]
 FOAM FATAL ERROR:
-Failed to decrypt file: constant/boundaryData/.../U.dvz.enc
+Failed to decrypt file: constant/boundaryData/.../U.dvz.zstd.enc
 \end{lstlisting}
 
 \textbf{Solutions}:

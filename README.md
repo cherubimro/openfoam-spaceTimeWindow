@@ -1,6 +1,6 @@
 # spaceTimeWindow Library
 
-Read **doc/tutorial.pdf** for details.
+**Read [doc/tutorial](./doc/tutorial.pdf) for details**.
 
 A library for space-time window extraction and reconstruction of LES simulations, developed for OpenFOAM.
 

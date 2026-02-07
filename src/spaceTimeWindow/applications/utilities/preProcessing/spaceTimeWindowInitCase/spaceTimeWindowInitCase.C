@@ -35,6 +35,9 @@ Usage
         -overwrite          Overwrite existing files
         -outletDirection <vector>  Normal direction for outlet patch (e.g., "(1 0 0)")
         -outletFraction <scalar>   Fraction of box face to use as outlet (default: 0.1)
+        -preciseBC          Use HbyA-based velocity BC and coupledPressure for p.
+                            Requires pimpleFoamPrecise extraction with fields (HbyA p)
+                            and extractGradients enabled.
 
     The outlet patch provides a pressure relief for incompressible solvers.
     Without an outlet, the all-Dirichlet velocity BC can cause pressure buildup.
@@ -1106,6 +1109,13 @@ int main(int argc, char *argv[])
         "and zeroGradient for all scalar fields (p, turbulence). Recommended for vortex shedding flows."
     );
 
+    argList::addBoolOption
+    (
+        "preciseBC",
+        "Use HbyA-based velocity BC and spaceTimeWindowCoupledPressure for p. "
+        "Requires pimpleFoamPrecise extraction with fields (HbyA p) and extractGradients."
+    );
+
     argList::addOption
     (
         "initialFields",
@@ -1165,6 +1175,26 @@ int main(int argc, char *argv[])
 
     // Inlet-outlet BC option: U uses spaceTimeWindowInletOutlet, p/nut use zeroGradient
     bool useInletOutletBC = args.found("inletOutletBC");
+
+    // Precise BC option: U reads HbyA data, p uses coupledPressure with gradp
+    bool usePreciseBC = args.found("preciseBC");
+
+    // Validate incompatible options: -preciseBC is incompatible with -inletOutletBC
+    if (usePreciseBC && useInletOutletBC)
+    {
+        FatalErrorInFunction
+            << "Options -preciseBC and -inletOutletBC are incompatible." << nl
+            << nl
+            << "  -preciseBC: Uses HbyA (intermediate velocity) as U boundary data" << nl
+            << "              and spaceTimeWindowCoupledPressure for p." << nl
+            << "              Gives machine-precision pressure recovery." << nl
+            << nl
+            << "  -inletOutletBC: Uses spaceTimeWindowInletOutlet for U with" << nl
+            << "                  flux-based Dirichlet/zeroGradient switching." << nl
+            << nl
+            << "Choose one approach." << nl
+            << exit(FatalError);
+    }
 
     // Validate incompatible options: -inletOutletBC is incompatible with -outletDirection/-outletFraction
     // The inlet-outlet BC approach uses flux-based switching on oldInternalFaces
@@ -2304,6 +2334,27 @@ int main(int argc, char *argv[])
             }
         }
 
+        // Validate -preciseBC: boundaryData must contain HbyA and gradp
+        if (usePreciseBC)
+        {
+            if (!boundaryDataFields.found("HbyA"))
+            {
+                FatalErrorInFunction
+                    << "-preciseBC requires 'HbyA' in boundaryData, but it was not found." << nl
+                    << "    Available boundaryData fields: " << boundaryDataFields << nl
+                    << "    Ensure pimpleFoamPrecise was used with fields (HbyA p)." << nl
+                    << exit(FatalError);
+            }
+            if (!boundaryDataFields.found("gradp"))
+            {
+                FatalErrorInFunction
+                    << "-preciseBC requires 'gradp' in boundaryData, but it was not found." << nl
+                    << "    Available boundaryData fields: " << boundaryDataFields << nl
+                    << "    Ensure extractGradients is enabled with gradientFields (p)." << nl
+                    << exit(FatalError);
+            }
+        }
+
         // Decide which fields to extract for initial conditions
         if (hasUserInitialFields)
         {
@@ -2410,7 +2461,18 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (fieldInBoundaryData)
+                    if (usePreciseBC && fieldName == "U")
+                    {
+                        // With -preciseBC: U reads HbyA data via fieldTableName
+                        os << "        type            spaceTimeWindow;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        fieldTableName  HbyA;" << nl
+                           << "        fixesValue      true;" << nl
+                           << "        allowTimeInterpolation  true;" << nl
+                           << "        timeInterpolationScheme cubic;" << nl
+                           << "        value           uniform (0 0 0);" << nl;
+                    }
+                    else if (fieldInBoundaryData)
                     {
                         // Field is in boundaryData - use spaceTimeWindow BC
                         if (useInletOutletBC)
@@ -2496,7 +2558,20 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (fieldInBoundaryData && !useInletOutletBC)
+                    if (usePreciseBC && fieldName == "p")
+                    {
+                        // With -preciseBC: p uses coupledPressure with gradp
+                        os << "        type            spaceTimeWindowCoupledPressure;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        blendingMode    fluxMagnitude;" << nl
+                           << "        dirichletWeight 0.8;" << nl
+                           << "        neumannWeight   0.8;" << nl
+                           << "        transitionWidth 0.1;" << nl
+                           << "        allowTimeInterpolation  true;" << nl
+                           << "        timeInterpolationScheme cubic;" << nl
+                           << "        value           uniform 0;" << nl;
+                    }
+                    else if (fieldInBoundaryData && !useInletOutletBC && !usePreciseBC)
                     {
                         // Field is in boundaryData and not using inletOutletBC - use spaceTimeWindow
                         os << "        type            spaceTimeWindow;" << nl
@@ -2506,7 +2581,7 @@ int main(int argc, char *argv[])
                     }
                     else
                     {
-                        // Field NOT in boundaryData, or using inletOutletBC - use zeroGradient
+                        // Field NOT in boundaryData, or using inletOutletBC/preciseBC - use zeroGradient
                         os << "        type            zeroGradient;" << nl;
                         if (!fieldInBoundaryData)
                         {
@@ -2588,7 +2663,20 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (fieldInBoundaryData && !useInletOutletBC)
+                    if (usePreciseBC && fieldName == "p")
+                    {
+                        // With -preciseBC: p uses coupledPressure with gradp
+                        os << "        type            spaceTimeWindowCoupledPressure;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        blendingMode    fluxMagnitude;" << nl
+                           << "        dirichletWeight 0.8;" << nl
+                           << "        neumannWeight   0.8;" << nl
+                           << "        transitionWidth 0.1;" << nl
+                           << "        allowTimeInterpolation  true;" << nl
+                           << "        timeInterpolationScheme cubic;" << nl
+                           << "        value           uniform 0;" << nl;
+                    }
+                    else if (fieldInBoundaryData && !useInletOutletBC && !usePreciseBC)
                     {
                         // Field is in boundaryData and not using inletOutletBC - use spaceTimeWindow
                         os << "        type            spaceTimeWindow;" << nl
@@ -2598,7 +2686,7 @@ int main(int argc, char *argv[])
                     }
                     else
                     {
-                        // Field NOT in boundaryData, or using inletOutletBC - use zeroGradient
+                        // Field NOT in boundaryData, or using inletOutletBC/preciseBC - use zeroGradient
                         os << "        type            zeroGradient;" << nl;
                     }
                     os << "    }" << nl;
@@ -2657,7 +2745,18 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (fieldInBoundaryData)
+                    if (usePreciseBC && fieldName == "U")
+                    {
+                        // With -preciseBC: U reads HbyA data via fieldTableName
+                        os << "        type            spaceTimeWindow;" << nl
+                           << "        dataDir         \"constant/boundaryData\";" << nl
+                           << "        fieldTableName  HbyA;" << nl
+                           << "        fixesValue      true;" << nl
+                           << "        allowTimeInterpolation  true;" << nl
+                           << "        timeInterpolationScheme cubic;" << nl
+                           << "        value           uniform (0 0 0);" << nl;
+                    }
+                    else if (fieldInBoundaryData)
                     {
                         // Field is in boundaryData - use spaceTimeWindow BC
                         if (useInletOutletBC)
@@ -2810,6 +2909,27 @@ int main(int argc, char *argv[])
 
     Info<< nl << "BoundaryData fields (for BC): " << boundaryDataFields << endl;
 
+    // Validate -preciseBC: boundaryData must contain HbyA and gradp
+    if (usePreciseBC)
+    {
+        if (!boundaryDataFields.found("HbyA"))
+        {
+            FatalErrorInFunction
+                << "-preciseBC requires 'HbyA' in boundaryData, but it was not found." << nl
+                << "    Available boundaryData fields: " << boundaryDataFields << nl
+                << "    Ensure pimpleFoamPrecise was used with fields (HbyA p)." << nl
+                << exit(FatalError);
+        }
+        if (!boundaryDataFields.found("gradp"))
+        {
+            FatalErrorInFunction
+                << "-preciseBC requires 'gradp' in boundaryData, but it was not found." << nl
+                << "    Available boundaryData fields: " << boundaryDataFields << nl
+                << "    Ensure extractGradients is enabled with gradientFields (p)." << nl
+                << exit(FatalError);
+        }
+    }
+
     // 6. Update initial fields with spaceTimeWindow BC
     // The spaceTimeWindowExtract already wrote subset fields to extractDir
     // We just need to update the boundary conditions on oldInternalFaces
@@ -2914,14 +3034,39 @@ int main(int argc, char *argv[])
                 std::string newBoundaryField = "boundaryField\n{\n    oldInternalFaces\n    {\n";
                 word bcType;
 
-                if (fieldInBoundaryData)
+                if (usePreciseBC && fieldName == "U")
+                {
+                    // With -preciseBC: U reads HbyA data via fieldTableName
+                    newBoundaryField += "        type            spaceTimeWindow;\n";
+                    newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                    newBoundaryField += "        fieldTableName  HbyA;\n";
+                    newBoundaryField += "        fixesValue      true;\n";
+                    newBoundaryField += "        allowTimeInterpolation  true;\n";
+                    newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                    newBoundaryField += "        value           uniform (0 0 0);\n";
+                    bcType = "spaceTimeWindow (HbyA)";
+                }
+                else if (usePreciseBC && fieldName == "p")
+                {
+                    // With -preciseBC: p uses coupledPressure with gradp
+                    newBoundaryField += "        type            spaceTimeWindowCoupledPressure;\n";
+                    newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                    newBoundaryField += "        blendingMode    fluxMagnitude;\n";
+                    newBoundaryField += "        dirichletWeight 0.8;\n";
+                    newBoundaryField += "        neumannWeight   0.8;\n";
+                    newBoundaryField += "        transitionWidth 0.1;\n";
+                    newBoundaryField += "        allowTimeInterpolation  true;\n";
+                    newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                    newBoundaryField += "        value           uniform 0;\n";
+                    bcType = "spaceTimeWindowCoupledPressure";
+                }
+                else if (fieldInBoundaryData)
                 {
                     // Field is in boundaryData - use spaceTimeWindow BC
                     if (fieldType == "vector")
                     {
                         if (useInletOutletBC)
                         {
-                            // With -inletOutletBC: U uses spaceTimeWindowInletOutlet
                             newBoundaryField += "        type            spaceTimeWindowInletOutlet;\n";
                             newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
                             newBoundaryField += "        phi             phi;\n";
@@ -2932,7 +3077,6 @@ int main(int argc, char *argv[])
                         }
                         else
                         {
-                            // Default: use spaceTimeWindow (Dirichlet)
                             newBoundaryField += "        type            spaceTimeWindow;\n";
                             newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
                             newBoundaryField += "        fixesValue      true;\n";
@@ -2945,13 +3089,11 @@ int main(int argc, char *argv[])
                         // Scalar field
                         if (useInletOutletBC)
                         {
-                            // With -inletOutletBC: scalar fields use zeroGradient
                             newBoundaryField += "        type            zeroGradient;\n";
                             bcType = "zeroGradient";
                         }
                         else
                         {
-                            // Default: use spaceTimeWindow (Dirichlet)
                             newBoundaryField += "        type            spaceTimeWindow;\n";
                             newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
                             newBoundaryField += "        fixesValue      true;\n";
@@ -3348,7 +3490,31 @@ int main(int argc, char *argv[])
                     std::string newBoundaryField = "boundaryField\n{\n    oldInternalFaces\n    {\n";
                     word bcType;
 
-                    if (fieldInBoundaryData)
+                    if (usePreciseBC && fieldName == "U")
+                    {
+                        newBoundaryField += "        type            spaceTimeWindow;\n";
+                        newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                        newBoundaryField += "        fieldTableName  HbyA;\n";
+                        newBoundaryField += "        fixesValue      true;\n";
+                        newBoundaryField += "        allowTimeInterpolation  true;\n";
+                        newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                        newBoundaryField += "        value           uniform (0 0 0);\n";
+                        bcType = "spaceTimeWindow (HbyA)";
+                    }
+                    else if (usePreciseBC && fieldName == "p")
+                    {
+                        newBoundaryField += "        type            spaceTimeWindowCoupledPressure;\n";
+                        newBoundaryField += "        dataDir         \"constant/boundaryData\";\n";
+                        newBoundaryField += "        blendingMode    fluxMagnitude;\n";
+                        newBoundaryField += "        dirichletWeight 0.8;\n";
+                        newBoundaryField += "        neumannWeight   0.8;\n";
+                        newBoundaryField += "        transitionWidth 0.1;\n";
+                        newBoundaryField += "        allowTimeInterpolation  true;\n";
+                        newBoundaryField += "        timeInterpolationScheme cubic;\n";
+                        newBoundaryField += "        value           uniform 0;\n";
+                        bcType = "spaceTimeWindowCoupledPressure";
+                    }
+                    else if (fieldInBoundaryData)
                     {
                         if (fieldType == "vector")
                         {

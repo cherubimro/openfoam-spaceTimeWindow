@@ -126,12 +126,20 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readPressureData
                 << exit(FatalError);
         }
 
-        // Skip FoamFile header if present
+        // Parse FoamFile header if present (handles binary format)
         token t(is);
         if (t.isWord() && t.wordToken() == "FoamFile")
         {
-            dictionary headerDict(is);
-            // Now read the field
+            dictionary headerDict;
+            headerDict.read(is, false);
+            if (headerDict.found("format"))
+            {
+                const word formatStr = headerDict.get<word>("format");
+                if (formatStr == "binary")
+                {
+                    is.format(IOstreamOption::BINARY);
+                }
+            }
         }
         else
         {
@@ -211,11 +219,20 @@ Foam::spaceTimeWindowCoupledPressureFvPatchScalarField::readGradientData
                 << exit(FatalError);
         }
 
-        // Skip FoamFile header if present
+        // Parse FoamFile header if present (handles binary format)
         token t(is);
         if (t.isWord() && t.wordToken() == "FoamFile")
         {
-            dictionary headerDict(is);
+            dictionary headerDict;
+            headerDict.read(is, false);
+            if (headerDict.found("format"))
+            {
+                const word formatStr = headerDict.get<word>("format");
+                if (formatStr == "binary")
+                {
+                    is.format(IOstreamOption::BINARY);
+                }
+            }
         }
         else
         {

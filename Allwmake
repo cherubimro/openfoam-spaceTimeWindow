@@ -43,6 +43,16 @@ else
     echo "                        or libsodium-devel (RHEL/Fedora)"
 fi
 
+# Check for libzstd (optional zstd compression support)
+if pkg-config --exists libzstd 2>/dev/null; then
+    echo "libzstd found - building with zstd compression support"
+    export FOAM_USE_ZSTD=1
+else
+    echo "libzstd not found - building without zstd compression"
+    echo "  To enable: install libzstd-dev (Debian/Ubuntu)"
+    echo "             or libzstd-devel (RHEL/Fedora/SUSE)"
+fi
+
 # Build the spaceTimeWindow library (BC + function object)
 echo ""
 echo "Building spaceTimeWindow library..."
@@ -60,6 +70,11 @@ if [ -n "$FOAM_USE_SODIUM" ]; then
     wmake src/spaceTimeWindow/applications/utilities/preProcessing/spaceTimeWindowKeygen
 fi
 
+# Build the pimpleFoamPrecise solver (registers HbyA for precise extraction)
+echo ""
+echo "Building pimpleFoamPrecise solver..."
+wmake src/pimpleFoamPrecise
+
 # Build the compareDvz utility (debug/testing tool)
 echo ""
 echo "Building compareDvz utility..."
@@ -70,11 +85,17 @@ echo "Build complete."
 echo "Library: \$FOAM_USER_LIBBIN/libspaceTimeWindow.so"
 echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowInitCase"
 echo "Utility: \$FOAM_USER_APPBIN/compareDvz"
+echo "Solver:  \$FOAM_USER_APPBIN/pimpleFoamPrecise"
 if [ -n "$FOAM_USE_SODIUM" ]; then
     echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowKeygen"
     echo "Encryption: enabled"
 else
     echo "Encryption: disabled (install libsodium to enable)"
+fi
+if [ -n "$FOAM_USE_ZSTD" ]; then
+    echo "Zstd compression: enabled"
+else
+    echo "Zstd compression: disabled (install libzstd to enable)"
 fi
 echo ""
 echo "To build documentation: ./Allwmake doc"

@@ -8,20 +8,127 @@ A library for space-time window extraction and reconstruction of LES simulations
 
 ## Overview
 
-This library provides three components for extracting a spatial subset from a full LES simulation and reconstructing the flow within that subset using pre-computed boundary conditions:
+This library provides components for extracting a spatial subset from a full LES simulation and reconstructing the flow within that subset using pre-computed boundary conditions:
 
 1. **spaceTimeWindowExtract** - Function object to extract boundary data during the original simulation
 2. **spaceTimeWindowInitCase** - Utility to initialize a reconstruction case from extracted data
-3. **spaceTimeWindowCoupledPressure** - **Recommended** pressure BC that blends Dirichlet/Neumann based on flux direction
-4. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
+3. **pimpleFoamPrecise** - Modified pimpleFoam that registers intermediate velocity HbyA for highest fidelity reconstruction
+4. **spaceTimeWindowCoupledPressure** - Pressure BC that blends Dirichlet/Neumann based on flux direction
+5. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
 
 ## Key Concepts
 
 ### Boundary Condition Approaches
 
-The library provides three approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
+The library provides four approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
 
-#### 1. Pressure-Coupled BC - **RECOMMENDED**
+#### 1. Precise BC (`-preciseBC`) - **HIGHEST FIDELITY**
+
+Uses the intermediate velocity **u\*** = H(U)/A (called `HbyA` in OpenFOAM) instead of the final velocity U as the boundary condition. Based on Wu, Zaki, Meneveau (Phys. Rev. Fluids 5, 064607, 2020), this is the theoretically optimal BC for subdomain pressure recovery.
+
+**Why u\* is the optimal boundary condition:**
+- The pressure Poisson equation is: div(1/A grad(p)) = div(u\*)
+- u\* is the *source term* of the pressure equation
+- Prescribing u\* exactly on the boundary makes the subdomain pressure equation identical to the full-domain one
+- Face values use OpenFOAM's exact distance-weighted interpolation formula — no interpolation error
+- Wu et al. (2020) demonstrated machine-precision accuracy in DNS, where the very high resolution minimizes the discretization stencil mismatch at boundary cells (Jasak 1996; Ferziger & Peric 2020), and spectral/direct (non-iterative) pressure solvers yield exact solutions
+- On practical LES/RANS meshes with iterative solvers (e.g. GAMG), the coarser grid amplifies this mismatch, though it remains negligible compared to the inherent modelling error of turbulence closures. `-preciseBC` remains the most accurate option (~20% lower pressure errors than standard coupled pressure, see Accuracy Comparison below)
+
+**Requirements:**
+- Extraction must use `pimpleFoamPrecise` (registers HbyA in objectRegistry)
+- Extraction configuration: `fields (HbyA p)` with `extractGradients true` and `gradientFields (p)`
+
+**Extraction configuration:**
+```cpp
+extractSubset
+{
+    type            spaceTimeWindowExtract;
+    libs            (spaceTimeWindow);
+    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
+    outputDir       "../subset";
+
+    fields          (HbyA p);       // HbyA from pimpleFoamPrecise + p
+    initialFields   (U p nut);      // U (final velocity) for solver initialization
+
+    extractGradients    true;
+    gradientFields      (p);
+
+    writeFormat     deltaVarint;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+```
+
+**Reconstruction boundary conditions:**
+```cpp
+// In 0/U (reads HbyA data, applied to U field)
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    fieldTableName  HbyA;       // Read HbyA data files
+    fixesValue      true;
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform (0 0 0);
+}
+
+// In 0/p (same as pressure-coupled)
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    blendingMode    fluxMagnitude;
+    dirichletWeight 0.8;
+    neumannWeight   0.8;
+    transitionWidth 0.1;
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform 0;
+}
+```
+
+```bash
+# Extraction with pimpleFoamPrecise
+cd source-case
+pimpleFoamPrecise
+
+# Initialization with -preciseBC
+cd ../subset-case
+spaceTimeWindowInitCase -sourceCase ../source-case -preciseBC
+
+# Reconstruction with standard pimpleFoam
+pimpleFoam
+```
+
+#### Accuracy Comparison
+
+Quantitative comparison on the UFR2-02 square cylinder case (110,720 cells full domain, 47,952 cells subset, 88 timesteps with dt=1e-4, no time interpolation, binary uncompressed data):
+
+| Method | U L_inf | U L_2 | p L_inf | p L_2 |
+|--------|---------|-------|---------|-------|
+| `-preciseBC` (u* + gradp) | 3.71e-3 | 3.07e-4 | 2.19e-3 | 3.22e-4 |
+| Coupled pressure (U + gradp) | 3.65e-3 | 3.10e-4 | 2.65e-3 | 3.50e-4 |
+
+Both methods start from identical binary initial conditions (zero error at t_0). Key findings:
+
+- **Velocity errors are nearly identical** — the choice of u* vs U for the velocity BC has negligible effect on velocity reconstruction.
+- **Pressure errors are ~20% lower with `-preciseBC`**: L_inf = 2.19e-3 vs 2.65e-3.
+- **Errors are concentrated near the boundary.** Only 0.25% of cells exceed 90% of the maximum error. The top-10 worst cells are all at x=0.055 (one cell layer from the extraction box face at x=0.05).
+
+Error decay with distance from the oldInternalFaces boundary (`-preciseBC`):
+
+| Distance from boundary | Cells | U mean err | U max err | p mean err | p max err |
+|------------------------|-------|------------|-----------|------------|-----------|
+| 0.005–0.01 (1 cell layer) | 1,296 | 1.2e-3 | 3.7e-3 | 1.0e-3 | 2.2e-3 |
+| 0.01–0.02 | 5,040 | 2.5e-4 | 9.9e-4 | 4.0e-4 | 1.5e-3 |
+| 0.02–0.05 | 12,384 | 1.1e-4 | 6.5e-4 | 2.4e-4 | 8.3e-4 |
+| 0.05–0.10 | 15,156 | 4.5e-5 | 2.9e-4 | 1.5e-4 | 7.5e-4 |
+| 0.10–0.20 | 14,076 | 1.2e-5 | 9.2e-5 | 5.3e-5 | 5.5e-4 |
+
+In this comparison, no temporal interpolation is used (boundary data at every solver timestep) and face values use OpenFOAM's exact distance-weighted interpolation formula. Despite this, a reconstruction error remains. It arises from the non-linear discretization difference between full-domain internal faces and subdomain Dirichlet boundary faces (Jasak 1996; Moukalled et al. 2016): convective flux limiters (TVD/upwind), the multigrid pressure solver (GAMG), and gradient reconstruction all behave differently at boundary faces (Ferziger & Peric 2020), introducing small differences that compound over timesteps. Wu et al. (2020) report machine-precision accuracy in DNS, where the very high spatial resolution minimizes this stencil mismatch and spectral/direct (non-iterative) pressure solvers yield exact solutions. Note that LES and RANS are inherently approximate---turbulence closure models introduce modelling errors that dwarf the reconstruction error.
+
+#### 2. Pressure-Coupled BC
 
 Uses `spaceTimeWindowCoupledPressure` BC for pressure and `spaceTimeWindow` for velocity. This is the **recommended approach** because it properly handles the elliptic nature of the pressure equation.
 
@@ -91,7 +198,7 @@ oldInternalFaces
 }
 ```
 
-#### 2. Inlet-Outlet BC (`-inletOutletBC`) - For Quick Tests
+#### 3. Inlet-Outlet BC (`-inletOutletBC`) - For Quick Tests
 
 Uses `spaceTimeWindowInletOutlet` BC which applies:
 - **Velocity (U)**: Flux-based switching - Dirichlet (prescribed value) at inflow faces, zeroGradient at outflow faces
@@ -103,7 +210,7 @@ This approach is simpler but **may produce different flow behavior** than the so
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 ```
 
-#### 3. Fixed Outlet Direction (`-outletDirection`) - For Steady-Mean Flows
+#### 4. Fixed Outlet Direction (`-outletDirection`) - For Steady-Mean Flows
 
 Creates a separate `outlet` patch from faces at one edge of the extraction box:
 - **oldInternalFaces**: Pure Dirichlet BC (spaceTimeWindow) on all remaining faces
@@ -115,7 +222,7 @@ Use when the mean flow direction is well-defined and outflow always occurs at a 
 spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 ```
 
-**Note:** Options 2 and 3 are mutually exclusive. Using both together produces an error with guidance.
+**Note:** Options `-preciseBC`, `-inletOutletBC`, and `-outletDirection` are mutually exclusive. Using incompatible combinations produces an error with guidance.
 
 ### Initial Fields vs Boundary Data Fields
 
@@ -123,10 +230,20 @@ The extraction can separate which fields are used for:
 - **Initial conditions** (`initialFields`): Fields written to the start time directory for solver initialization
 - **Time-varying boundary data** (`fields`): Fields written to `boundaryData/` for time-varying BCs
 
-For pressure-coupled BC (recommended), extract both U and p with gradients:
+For precise BC (highest fidelity, requires `pimpleFoamPrecise`):
 
 ```cpp
-// In extraction function object - pressure-coupled (recommended)
+// In extraction function object - precise BC (highest fidelity)
+fields          (HbyA p);         // HbyA (intermediate velocity) and p
+initialFields   (U p nut);        // U (final velocity) for solver initialization
+extractGradients    true;
+gradientFields      (p);          // Creates gradp for Neumann blending
+```
+
+For pressure-coupled BC (standard), extract both U and p with gradients:
+
+```cpp
+// In extraction function object - pressure-coupled (standard)
 fields          (U p);             // Both U and p for time-varying BC
 initialFields   (U p nut);         // nut needed for turbulence model
 extractGradients    true;
@@ -143,6 +260,21 @@ initialFields   (U p nut);         // More fields for initial conditions
 
 Fields NOT in `boundaryData` automatically get `zeroGradient` BC on `oldInternalFaces`.
 
+## Field Selection by Turbulence Model
+
+When configuring the extraction, include all fields required by your turbulence model:
+
+| Turbulence Model | Recommended Fields |
+|------------------|-------------------|
+| LES Smagorinsky | `(U p nut)` |
+| LES dynamicKEqn | `(U p nut k)` |
+| LES WALE | `(U p nut)` |
+| RANS k-ε | `(U p nut k epsilon)` |
+| RANS k-ω SST | `(U p nut k omega)` |
+| Spalart-Allmaras | `(U p nut nuTilda)` |
+
+For `-preciseBC` (highest fidelity), use `fields (HbyA p)` and `initialFields` as shown above. For standard pressure-coupled BC, use `fields (U p)` plus turbulence fields.
+
 ## Workflow
 
 ### Serial Execution
@@ -150,11 +282,11 @@ Fields NOT in `boundaryData` automatically get `zeroGradient` BC on `oldInternal
 ```bash
 # 1. Run extraction during simulation
 cd source-case
-pimpleFoam    # With spaceTimeWindowExtract function object
+pimpleFoamPrecise    # Use pimpleFoamPrecise for -preciseBC, or pimpleFoam otherwise
 
-# 2. Initialize reconstruction case (recommended: inlet-outlet BC)
+# 2. Initialize reconstruction case
 cd ../subset-case
-spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
+spaceTimeWindowInitCase -sourceCase ../source-case -preciseBC  # or no flag for standard
 
 # 3. Run reconstruction
 pimpleFoam
@@ -199,7 +331,7 @@ In parallel mode:
 
 | Mode | Start Time | Timesteps Used | Use Case |
 |------|------------|----------------|----------|
-| `none` (exact) | t_0 | 1 (exact match) | "Bit"-reproducible results (highest fidelity) |
+| `none` (exact) | t_0 | 1 (exact match) | Highest fidelity (no interpolation error) |
 | `linear` | t_1 | 2 (bracketing) | Simple, smoothly varying flows |
 | `cubic` | t_2 | 4 (Catmull-Rom) | Unsteady turbulent flows (recommended) |
 
@@ -304,7 +436,13 @@ outputDir/
 Initializes a fully configured reconstruction case from the extracted data.
 
 ```bash
-# Recommended: inlet-outlet BC for unsteady turbulent flows
+# Highest fidelity: precise BC (requires pimpleFoamPrecise extraction)
+spaceTimeWindowInitCase -sourceCase ../source-case -preciseBC
+
+# Standard: pressure-coupled BC (default, no flag needed)
+spaceTimeWindowInitCase -sourceCase ../source-case
+
+# Quick tests: inlet-outlet BC
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 
 # Alternative: fixed outlet direction for steady-mean flows
@@ -320,6 +458,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 |------------------|--------------------------------------------------|----------|
 | -sourceCase      | Source case directory (where extraction ran)     | yes      |
 | -extractDir      | Directory with extracted data (default: cwd)     | no       |
+| -preciseBC       | Use HbyA-based velocity BC and coupledPressure for p (requires `pimpleFoamPrecise` extraction) | no |
 | -inletOutletBC   | Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) | no |
 | -outletDirection | Create fixed outlet patch in given direction (e.g., "(1 0 0)") | no |
 | -outletFraction  | Fraction of box extent for outlet region (default: 0.1) | no |
@@ -329,7 +468,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 | -coarsenLevel    | Coarsen mesh N times (each level merges cells)   | no |
 | -overwrite       | Overwrite existing files                         | no       |
 
-**Note:** `-inletOutletBC` and `-outletDirection` are mutually exclusive. `-refineLevel` and `-coarsenLevel` are also mutually exclusive.
+**Note:** `-preciseBC`, `-inletOutletBC`, and `-outletDirection` are mutually exclusive. `-refineLevel` and `-coarsenLevel` are also mutually exclusive.
 
 **What it creates:**
 
@@ -344,16 +483,47 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 
 For each field in the initial time directory:
 
-| Field in boundaryData? | -inletOutletBC? | Field Type | BC Applied |
-|------------------------|-----------------|------------|------------|
-| Yes | Yes | vector (U) | `spaceTimeWindowInletOutlet` |
-| Yes | Yes | scalar | `zeroGradient` |
-| Yes | No | any | `spaceTimeWindow` (Dirichlet) |
-| No | any | any | `zeroGradient` |
+| Mode | Field | In boundaryData? | Field Type | BC Applied |
+|------|-------|-------------------|------------|------------|
+| `-preciseBC` | U | --- | vector | `spaceTimeWindow` + `fieldTableName HbyA` |
+| `-preciseBC` | p | --- | scalar | `spaceTimeWindowCoupledPressure` |
+| `-preciseBC` | other | No | any | `zeroGradient` |
+| `-inletOutletBC` | --- | Yes | vector (U) | `spaceTimeWindowInletOutlet` |
+| `-inletOutletBC` | --- | Yes | scalar | `zeroGradient` |
+| default | --- | Yes | any | `spaceTimeWindow` (Dirichlet) |
+| any | --- | No | any | `zeroGradient` |
 
-This ensures fields without time-varying data automatically get appropriate BCs.
+This ensures fields without time-varying data automatically get appropriate BCs. With `-preciseBC`, the U and p fields are handled specially (U reads HbyA data via `fieldTableName`).
 
-### spaceTimeWindowCoupledPressure (Boundary Condition) - **RECOMMENDED for Pressure**
+### pimpleFoamPrecise (Solver)
+
+Modified version of OpenFOAM's `pimpleFoam` that registers the intermediate velocity **u\*** = H(U)/A (named `HbyA`) in the objectRegistry, making it accessible to function objects like `spaceTimeWindowExtract`.
+
+**Why a separate solver is needed:**
+
+In standard `pimpleFoam`, the local `volVectorField HbyA(...)` in `pEqn.H` is stack-allocated. It auto-registers in the objectRegistry upon construction but its destructor **unregisters** it when `pEqn.H` goes out of scope. By the time function objects run (after `runTime.write()`), HbyA is no longer available.
+
+**Implementation:**
+
+`pimpleFoamPrecise` solves this by declaring a persistent `volVectorField HbyA_stored` in `createFields.H` with `IOobject::REGISTER`. This field survives across the time loop. In `pEqn.H`, the computed HbyA is copied to the persistent field with `HbyA_stored = HbyA`.
+
+The overhead is negligible: one field copy per pressure correction iteration.
+
+**Usage:**
+
+```bash
+# In source case controlDict:
+#   application  pimpleFoamPrecise;
+# In extraction function object:
+#   fields  (HbyA p);
+
+cd source-case
+pimpleFoamPrecise
+```
+
+The reconstruction phase uses standard `pimpleFoam` --- no special solver is needed for reconstruction.
+
+### spaceTimeWindowCoupledPressure (Boundary Condition)
 
 Mixed boundary condition that blends Dirichlet (extracted pressure) and Neumann (extracted gradient) based on local flux direction. This is the **recommended approach** for pressure because it properly handles the elliptic nature of the pressure equation.
 
@@ -544,10 +714,11 @@ Creates an outlet patch where mass imbalance can escape:
 
 | Use Case | Command/Approach | Notes |
 |----------|---------|-------|
-| Accurate reconstruction | Pressure-coupled BC | **Recommended**. Reproduces original flow. |
+| Highest fidelity reconstruction | `-preciseBC` | ~20% lower pressure error than default. Requires `pimpleFoamPrecise`. |
+| Accurate reconstruction | Pressure-coupled BC (default) | Reproduces original flow to solver tolerance. |
 | Quick tests | `-inletOutletBC` | Natural mass balance, may drift from source. |
 | Steady-mean flow direction | `-outletDirection "(1 0 0)"` | When outlet location is known. |
-| Maximum fidelity | Pressure-coupled + `-correctMassFlux` | Best accuracy. |
+| Maximum fidelity | `-preciseBC` + `-correctMassFlux` | Best accuracy. |
 
 ## Boundary Data Compression
 
@@ -789,6 +960,30 @@ cd examples/ufr2-02
 ./Allrun
 ```
 
+## Validation
+
+### CFD Validation Philosophy
+
+In computational fluid dynamics, validation means demonstrating that a simulation reproduces the **physics** of the flow—not that it produces bit-identical numbers. A validated CFD result agrees with experimental measurements (velocity profiles, pressure distributions, turbulent statistics, shedding frequencies, etc.) within quantified uncertainties.
+
+This distinction is central to the space-time window approach. The reconstruction does not aim to be a bit-exact copy of the original simulation; it aims to be a **physically faithful re-simulation** of the same flow inside the region of interest. The governing equations, boundary conditions, and fluid properties are identical; what changes is the domain extent and, optionally, the mesh resolution.
+
+Different meshes, turbulence models, numerical schemes, and even different software packages will produce numerically different fields, yet all can be equally "valid" if they capture the physical phenomena to the required accuracy.
+
+### Validating the Reconstruction
+
+The reconstruction can be validated by comparing:
+
+- **Instantaneous velocity fields** at matching timesteps
+- **Vortex shedding frequency** (should match original)
+- **Mean velocity profiles** in the wake
+- **Reynolds stress components**
+- **Pressure distributions** and recovery
+
+Because the reconstruction solves the same equations with the same physical parameters, any discrepancy with the full-domain solution is due to the finite-volume discretization change at the extraction boundary (see Accuracy Comparison above), not to different physics. These errors are localized near the boundary and decay rapidly with distance.
+
+**Note:** The reconstruction should closely reproduce the original flow within the extraction region (to solver tolerance) when using exact timestep matching. Small differences may occur at the outlet boundary due to the different boundary condition type. When the mesh resolution is changed (refinement or coarsening), additional spatial interpolation errors appear, but the physical behavior—vortex dynamics, mean profiles, spectral content—is preserved.
+
 ## Mesh Coarsening and Refinement
 
 The reconstruction mesh can be coarsened or refined relative to the extraction mesh, enabling simulations at different resolutions than the original.
@@ -972,5 +1167,6 @@ Anton, A.-A. (2011). *"Space-Time Window Reconstruction in Parallel High Perform
 Or acknowledge: "This work made use of openfoam-spaceTimeWindow https://dev.cs.upt.ro/alin.anton/openfoam-spaceTimeWindow|https://github.com/cherubimro/openfoam-spaceTimeWindow"
 
 **Additional references:**
+- Wu, X., Zaki, T.A., Meneveau, C. (2020). *"High-fidelity inflow conditions for internal flow calculations using the boundary-layer/Reynolds-averaged Navier-Stokes approach"*, Phys. Rev. Fluids 5, 064607
 - Lyn, D.A., Einav, S., Rodi, W., Park, J.-H. (1995). *"A laser-Doppler velocimetry study of ensemble-averaged characteristics of the turbulent near wake of a square cylinder"*, J. Fluid Mech. 304, 285-319
 - Barry, P.J., Goldman, R.N. (1988). *"A recursive evaluation algorithm for a class of Catmull-Rom splines"*, ACM SIGGRAPH Computer Graphics 22(4), 199-204

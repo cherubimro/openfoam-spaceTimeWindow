@@ -60,13 +60,17 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeFoamFileHeader
 (
     Ostream& os,
     const word& className,
-    const word& objectName
+    const word& objectName,
+    IOstreamOption::streamFormat fmt
 ) const
 {
+    const word formatStr =
+        (fmt == IOstreamOption::BINARY) ? "binary" : "ascii";
+
     os  << "FoamFile" << nl
         << "{" << nl
         << "    version     2.0;" << nl
-        << "    format      ascii;" << nl
+        << "    format      " << formatStr << ";" << nl
         << "    class       " << className << ";" << nl
         << "    object      " << objectName << ";" << nl
         << "}" << nl << nl;
@@ -778,32 +782,26 @@ void Foam::functionObjects::spaceTimeWindowExtract::gatherAndWriteInitialFields(
                     bfaceOffset += gatheredBoundary[proci].size();
                 }
 
-                // Write field
-                OFstream os(timeDir / fieldName);
-                writeFoamFileHeader(os, "volScalarField", fieldName);
+                // Write field (respects writeFormat_ for binary support)
+                OFstream os
+                (
+                    timeDir / fieldName,
+                    IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+                );
+                writeFoamFileHeader(os, "volScalarField", fieldName, writeFormat_);
 
-                os << "dimensions      " << sfPtr->dimensions() << ";" << nl << nl
-                   << "internalField   nonuniform List<scalar>" << nl
-                   << allInternal.size() << nl << '(' << nl;
-                forAll(allInternal, i)
-                {
-                    os << allInternal[i] << nl;
-                }
-                os << ')' << ';' << nl << nl;
+                os << "dimensions      " << sfPtr->dimensions() << ";" << nl << nl;
+
+                allInternal.writeEntry("internalField", os);
+                os << nl;
 
                 os << "boundaryField" << nl << '{' << nl;
                 os << "    oldInternalFaces" << nl
                    << "    {" << nl
-                   << "        type            calculated;" << nl
-                   << "        value           nonuniform List<scalar>" << nl
-                   << "        " << allBoundary.size() << nl
-                   << "        (" << nl;
-                forAll(allBoundary, i)
-                {
-                    os << "        " << allBoundary[i] << nl;
-                }
-                os << "        );" << nl
-                   << "    }" << nl;
+                   << "        type            calculated;" << nl;
+                os << "        ";
+                allBoundary.writeEntry("value", os);
+                os << "    }" << nl;
                 os << '}' << nl;
             }
             continue;
@@ -863,31 +861,25 @@ void Foam::functionObjects::spaceTimeWindowExtract::gatherAndWriteInitialFields(
                     bfaceOffset += gatheredBoundary[proci].size();
                 }
 
-                OFstream os(timeDir / fieldName);
-                writeFoamFileHeader(os, "volVectorField", fieldName);
+                OFstream os
+                (
+                    timeDir / fieldName,
+                    IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+                );
+                writeFoamFileHeader(os, "volVectorField", fieldName, writeFormat_);
 
-                os << "dimensions      " << vfPtr->dimensions() << ";" << nl << nl
-                   << "internalField   nonuniform List<vector>" << nl
-                   << allInternal.size() << nl << '(' << nl;
-                forAll(allInternal, i)
-                {
-                    os << allInternal[i] << nl;
-                }
-                os << ')' << ';' << nl << nl;
+                os << "dimensions      " << vfPtr->dimensions() << ";" << nl << nl;
+
+                allInternal.writeEntry("internalField", os);
+                os << nl;
 
                 os << "boundaryField" << nl << '{' << nl;
                 os << "    oldInternalFaces" << nl
                    << "    {" << nl
-                   << "        type            calculated;" << nl
-                   << "        value           nonuniform List<vector>" << nl
-                   << "        " << allBoundary.size() << nl
-                   << "        (" << nl;
-                forAll(allBoundary, i)
-                {
-                    os << "        " << allBoundary[i] << nl;
-                }
-                os << "        );" << nl
-                   << "    }" << nl;
+                   << "        type            calculated;" << nl;
+                os << "        ";
+                allBoundary.writeEntry("value", os);
+                os << "    }" << nl;
                 os << '}' << nl;
             }
         }
@@ -1148,22 +1140,19 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
             tmp<volScalarField> tsubField = meshSubsetPtr_->interpolate(*sfPtr);
             const volScalarField& subField = tsubField();
 
-            // Write subset field
-            OFstream os(timeDir / fieldName);
-            writeFoamFileHeader(os, "volScalarField", fieldName);
+            // Write subset field (respects writeFormat_ for binary support)
+            OFstream os
+            (
+                timeDir / fieldName,
+                IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+            );
+            writeFoamFileHeader(os, "volScalarField", fieldName, writeFormat_);
 
-            os  << "dimensions      " << sfPtr->dimensions() << ";" << nl << nl
-                << "internalField   ";
+            os  << "dimensions      " << sfPtr->dimensions() << ";" << nl << nl;
 
-            // Write internal field
-            os << "nonuniform List<scalar>" << nl
-               << subField.primitiveField().size() << nl
-               << '(' << nl;
-            forAll(subField.primitiveField(), i)
-            {
-                os << subField.primitiveField()[i] << nl;
-            }
-            os << ')' << ';' << nl << nl;
+            // writeEntry handles binary/ascii automatically
+            subField.primitiveField().writeEntry("internalField", os);
+            os << nl;
 
             // Write boundary field
             os << "boundaryField" << nl << '{' << nl;
@@ -1172,16 +1161,10 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
                 const fvPatch& patch = subMesh.boundary()[patchi];
                 os << "    " << patch.name() << nl
                    << "    {" << nl
-                   << "        type            calculated;" << nl
-                   << "        value           nonuniform List<scalar>" << nl
-                   << "        " << subField.boundaryField()[patchi].size() << nl
-                   << "        (" << nl;
-                forAll(subField.boundaryField()[patchi], i)
-                {
-                    os << "        " << subField.boundaryField()[patchi][i] << nl;
-                }
-                os << "        );" << nl
-                   << "    }" << nl;
+                   << "        type            calculated;" << nl;
+                os << "        ";
+                subField.boundaryField()[patchi].writeEntry("value", os);
+                os << "    }" << nl;
             }
             os << '}' << nl;
 
@@ -1195,20 +1178,17 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
             tmp<volVectorField> tsubField = meshSubsetPtr_->interpolate(*vfPtr);
             const volVectorField& subField = tsubField();
 
-            OFstream os(timeDir / fieldName);
-            writeFoamFileHeader(os, "volVectorField", fieldName);
+            OFstream os
+            (
+                timeDir / fieldName,
+                IOstreamOption(writeFormat_, IOstreamOption::currentVersion)
+            );
+            writeFoamFileHeader(os, "volVectorField", fieldName, writeFormat_);
 
-            os  << "dimensions      " << vfPtr->dimensions() << ";" << nl << nl
-                << "internalField   ";
+            os  << "dimensions      " << vfPtr->dimensions() << ";" << nl << nl;
 
-            os << "nonuniform List<vector>" << nl
-               << subField.primitiveField().size() << nl
-               << '(' << nl;
-            forAll(subField.primitiveField(), i)
-            {
-                os << subField.primitiveField()[i] << nl;
-            }
-            os << ')' << ';' << nl << nl;
+            subField.primitiveField().writeEntry("internalField", os);
+            os << nl;
 
             os << "boundaryField" << nl << '{' << nl;
             forAll(subMesh.boundary(), patchi)
@@ -1216,16 +1196,10 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeInitialFields()
                 const fvPatch& patch = subMesh.boundary()[patchi];
                 os << "    " << patch.name() << nl
                    << "    {" << nl
-                   << "        type            calculated;" << nl
-                   << "        value           nonuniform List<vector>" << nl
-                   << "        " << subField.boundaryField()[patchi].size() << nl
-                   << "        (" << nl;
-                forAll(subField.boundaryField()[patchi], i)
-                {
-                    os << "        " << subField.boundaryField()[patchi][i] << nl;
-                }
-                os << "        );" << nl
-                   << "    }" << nl;
+                   << "        type            calculated;" << nl;
+                os << "        ";
+                subField.boundaryField()[patchi].writeEntry("value", os);
+                os << "    }" << nl;
             }
             os << '}' << nl;
         }

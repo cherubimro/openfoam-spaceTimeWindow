@@ -225,12 +225,13 @@ protected:
 
     // Protected Member Functions
 
-        //- Write FoamFile header
+        //- Write FoamFile header (format defaults to ASCII for metadata/mesh)
         void writeFoamFileHeader
         (
             Ostream& os,
             const word& className,
-            const word& objectName
+            const word& objectName,
+            IOstreamOption::streamFormat fmt = IOstreamOption::ASCII
         ) const;
 
         //- Initialize the mesh subset

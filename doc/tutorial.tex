@@ -104,7 +104,9 @@
     keywords={type, libs, box, outputDir, fields, writeFormat, writeControl,
               writeInterval, deltaT, startTime, endTime, application, solver,
               fixesValue, dataDir, allowTimeInterpolation, timeInterpolationScheme,
-              reportFlux, compress, publicKey, encrypt, value, uniform},
+              reportFlux, compress, publicKey, encrypt, value, uniform,
+              fieldTableName, blendingMode, dirichletWeight, neumannWeight,
+              transitionWidth, phi},
     morecomment=[l]{//},
     morecomment=[s]{/*}{*/},
     morestring=[b]",
@@ -113,8 +115,9 @@
 
 % Define bash style
 \lstdefinelanguage{bash}{
-    keywords={cd, mpirun, pimpleFoam, reconstructPar, spaceTimeWindowInitCase,
-              spaceTimeWindowKeygen, decomposePar, export, source, wmake},
+    keywords={cd, mpirun, pimpleFoam, pimpleFoamPrecise, reconstructPar,
+              spaceTimeWindowInitCase, spaceTimeWindowKeygen, decomposePar,
+              export, source, wmake},
     morecomment=[l]{\#},
     morestring=[b]",
     morestring=[b]',
@@ -204,12 +207,16 @@
 % If biber is available, uncomment the biblatex lines instead
 \usepackage[numbers,sort&compress]{natbib}
 \bibliographystyle{unsrtnat}
+\usepackage{doi}              % Makes DOI fields clickable hyperlinks
 % Alternative: biblatex with biber (comment natbib lines above)
 % \usepackage[backend=biber,style=numeric,sorting=none]{biblatex}
 % \addbibresource{tutorial.bib}
 
 % Cross-references
 \usepackage{cleveref}
+
+% Keep floats within their section boundaries
+\usepackage[section]{placeins}
 
 % Table of contents styling
 \usepackage{tocloft}
@@ -307,7 +314,7 @@
 % Version badge
 \begin{tikzpicture}
     \node[fill=primarylight, rounded corners=4pt, inner sep=8pt, font=\large\sffamily] {
-	    \color{primarydark}Version 1.0 (Draft) \quad|\quad OpenFOAM v2512
+	    \color{primarydark}Version 1.0 \quad|\quad OpenFOAM v2512
     };
 \end{tikzpicture}
 
@@ -405,7 +412,9 @@ Under the following terms:
 
 {\small\centering
 OPENFOAM® is a registered trademark of OpenCFD Limited.\\
-\centering CHERUBIM® is a registered trademark of the author. This software is libre software (libreware). 
+\centering CHERUBIM® is a registered trademark of the author. This software is libre software (libreware).\\
+\vspace{2cm}
+\centering If this software has been useful in your research, please consider instructions from the \emph{Acknowledging this work} section.
 }
 
 \vspace*{\fill}
@@ -500,7 +509,7 @@ export FOAM_USE_SODIUM=1 && wmake
 \section{Concept: Space-Time Window Extraction and Reconstruction}
 \label{sec:concept}
 
-This section introduces the fundamental concepts behind space-time window extraction and reconstruction. Understanding these concepts is essential before diving into the technical implementation details.
+This section introduces the fundamental concepts behind space-time window extraction and reconstruction in high performance fluid flow simulations. Understanding these concepts is essential before diving into the technical implementation details.
 
 \subsection{The Challenge of Large-Scale CFD Simulations}
 
@@ -508,16 +517,20 @@ Modern computational fluid dynamics (CFD) simulations, particularly Large Eddy S
 
 \begin{itemize}
     \item Meshes with $10^7$--$10^9$ cells
-    \item Thousands of timesteps
+    \item Thousands of timesteps ($\delta t = 1^{-6}$ time stepping)
     \item Multiple field variables (velocity, pressure, turbulence quantities)
     \item Terabytes to petabytes of raw output data
 \end{itemize}
 
-Storing and post-processing this data is often impractical. The space-time window approach addresses this by extracting only the data needed to reconstruct the flow in a \emph{region of interest} at a later time.
+Quite often the simulation domain is large enough to allow for the fluid flow to fully develop within much smaller local regions of interest. The European Research Community on Flow, Turbulence and Combustion (ERCOFTAC) database~\cite{ERCOFTAC} contains numerical results and laboratory measurements, and new software implementations must be validated against previously confirmed results (physics remains the same, numerical solvers may change).
+
+Nevertheless, validation is always performed in relation to the physics of the fluid flow, not against bit-exact numerical values from previous simulations.
+
+Storing and post-processing this data is often impractical. When a researcher defines a \emph{region of interest} within a large fluid flow domain, the goal is to \textbf{zoom in} and obtain richer detail about the flow in that region---higher spatial or temporal resolution, more detailed post-processing, or the ability to explore ``what-if'' scenarios with different turbulence models---not to produce a bit-by-bit identical copy of the internal fields from the original simulation. The space-time window approach addresses precisely this need: it extracts only the boundary data required to drive an independent simulation within the region of interest at a later time, and allows the user to change the computational resolution, numerical schemes, or post-processing strategy ``at home'', on modest hardware. The reconstructed flow is physically faithful---it satisfies the same governing equations with the same boundary conditions---but it is not, and need not be, numerically identical to the original (see \cref{sec:concept-why} for a discussion of the discretisation differences).
 
 \subsection{The Space-Time Window Concept}
 
-A \textbf{space-time window} is a bounded region in both space (a 3D box) and time (a time interval) from which we extract the information necessary to reconstruct the flow field. The key insight is that we only need:
+A \textbf{space-time window}~\cite{Anton2011, Anton2011b, Anton2013} is a bounded region in both space (a 3D box) and time (a time interval) from which we extract the information necessary to reconstruct the flow field. The key insight is that we only need:
 
 \begin{enumerate}
     \item \textbf{Initial conditions}: The complete field state at one timestep ($t_0$)
@@ -572,16 +585,18 @@ A \textbf{space-time window} is a bounded region in both space (a 3D box) and ti
 
     % Labels
     \node[anchor=north west, fill=white, inner sep=2pt] at (0.1,4.9) {\textbf{Full Domain}};
-    \node[anchor=south, fill=white, inner sep=2pt, primarydark] at (4,0.8) {\textbf{Extraction Box}};
     \node[anchor=west, warningorange] at (7.3,3.5) {\textbf{Boundary}};
     \node[anchor=west, warningorange] at (7.3,3.0) {\textbf{Data}};
 
     % Flow direction label
     \node[secondarygreen, anchor=west] at (-0.5,0.5) {Flow};
 
+    % Extraction box label (below gray domain for visibility)
+    \node[primarydark, font=\sffamily\bfseries] at (4,-0.5) {Extraction Box};
+
     % Dimensions annotation
-    \draw[<->, gray, line width=0.8pt] (2,-0.3) -- (6,-0.3);
-    \node[gray, anchor=north] at (4,-0.3) {$L_x$};
+    \draw[<->, gray, line width=0.8pt] (2,-1.2) -- (6,-1.2);
+    \node[gray, anchor=north] at (4,-1.2) {$L_x$};
 \end{tikzpicture}
 \caption{Space-time window extraction: A bounding box (blue) defines the region of interest within the full computational domain (gray). Boundary data (orange) is recorded at every timestep as the flow passes through.}
 \label{fig:spacetime-window}
@@ -646,10 +661,6 @@ The workflow consists of two distinct phases that can be separated in time and c
     \node[anchor=north, secondarygreen, font=\sffamily\footnotesize] at (-1.5,-1.3) {$t_0$ fields};
     \node[anchor=north, warningorange, font=\sffamily\footnotesize] at (1.5,-1.3) {$t_0 \to t_n$};
 
-    % === STORAGE/TRANSFER ===
-    \draw[dashed, gray, line width=1pt] (4,-2) -- (4,5.5);
-    \node[gray, rotate=90, anchor=south] at (4.3,2) {\textbf{Data Transfer / Archival}};
-
     % === RIGHT SIDE: RECONSTRUCTION PHASE ===
     \node[phase, fill=accentlight, draw=accentpurple, line width=1pt] (reconstruct) at (8,4) {
         \begin{tabular}{c}
@@ -685,12 +696,16 @@ The workflow consists of two distinct phases that can be separated in time and c
     \draw[arrow, gray, dashed] (initdata.east) -- ++(0.5,0) |- ([yshift=0.3cm]initdata2.west) -- (initdata2.west);
     \draw[arrow, gray, dashed] (bcdata.east) -- ++(0.3,0) |- ([yshift=-0.3cm]bcdata2.west) -- (bcdata2.west);
 
-    % Time annotations
-    \draw[<->, gray] (-2.8,4.8) -- (-2.8,1.2);
-    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (-3.1,3) {Hours--Days};
+    % Time annotations (centered on arrows with white fill)
+    \draw[<->, gray] (-3.8,4.8) -- (-3.8,1.2);
+    \node[gray, fill=white, inner sep=2pt, rotate=90, font=\sffamily\footnotesize] at (-3.8,3) {Hours--Days};
 
-    \draw[<->, gray] (10.8,4.8) -- (10.8,1.2);
-    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (11.1,3) {Minutes--Hours};
+    \draw[<->, gray] (11.8,4.8) -- (11.8,1.2);
+    \node[gray, fill=white, inner sep=2pt, rotate=90, font=\sffamily\footnotesize] at (11.8,3) {Minutes--Hours};
+
+    % === STORAGE/TRANSFER (drawn last so it appears on top) ===
+    \draw[dashed, gray, line width=1pt] (4,-2) -- (4,5.5);
+    \node[gray, fill=white, inner sep=3pt, rotate=90] at (4,2) {\textbf{Data Transfer / Archival}};
 \end{tikzpicture}
 \caption{Two-phase workflow: The extraction phase runs on HPC resources and produces compact data files. The reconstruction phase can run on modest hardware, reproducing the flow in the region of interest.}
 \label{fig:extraction-reconstruction}
@@ -814,7 +829,7 @@ In parallel mode, the extraction process operates as follows:
     \item \textbf{Unified output}: The master processor writes a single, consolidated boundary data file for each timestep
 \end{enumerate}
 
-\Cref{fig:mpi-gathering} shows the detailed data flow during the extraction process. The \texttt{spaceTimeWindowExtract} function object runs on each MPI process, extracting local contributions that are then gathered and merged into unified output files.
+\Cref{fig:mpi-gathering} shows the detailed data flow during the extraction process. The \texttt{spaceTime\-Window\-Extract} function object runs on each MPI process, extracting local contributions that are then gathered and merged into unified output files.
 
 \begin{figure}[htbp]
 \centering
@@ -847,26 +862,26 @@ In parallel mode, the extraction process operates as follows:
 
     % P0 (Master)
     \node[procbox, fill=secondarylight, draw=secondarygreen] (p0) at (0,6) {};
-    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (0,7) {P0 (Master)};
+    \node[anchor=south, font=\sffamily\bfseries, secondarygreen] at (0,7.2) {P0 (Master)};
     \node[databox, fill=white, draw=primaryblue] at (0,6.3) {Local faces: 127};
     \node[databox, fill=white, draw=warningorange] at (0,5.5) {U,p,gradp};
     \node[font=\sffamily\tiny, gray] at (0,4.9) {+ gathering};
 
     % P1
     \node[procbox, fill=primarylight, draw=primaryblue] (p1) at (4,6) {};
-    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (4,7) {P1};
+    \node[anchor=south, font=\sffamily\bfseries, primaryblue] at (4,7.2) {P1};
     \node[databox, fill=white, draw=primaryblue] at (4,6.3) {Local faces: 89};
     \node[databox, fill=white, draw=warningorange] at (4,5.5) {U,p,gradp};
 
     % P2
     \node[procbox, fill=primarylight, draw=primaryblue] (p2) at (8,6) {};
-    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (8,7) {P2};
+    \node[anchor=south, font=\sffamily\bfseries, primaryblue] at (8,7.2) {P2};
     \node[databox, fill=white, draw=primaryblue] at (8,6.3) {Local faces: 156};
     \node[databox, fill=white, draw=warningorange] at (8,5.5) {U,p,gradp};
 
     % P3
     \node[procbox, fill=primarylight, draw=primaryblue] (p3) at (12,6) {};
-    \node[anchor=north, font=\sffamily\bfseries, primaryblue] at (12,7) {P3};
+    \node[anchor=south, font=\sffamily\bfseries, primaryblue] at (12,7.2) {P3};
     \node[databox, fill=white, draw=primaryblue] at (12,6.3) {Local faces: 0};
     \node[font=\sffamily\tiny, gray] at (12,5.5) {(outside box)};
 
@@ -874,48 +889,39 @@ In parallel mode, the extraction process operates as follows:
     \node[font=\sffamily\large, gray] at (15,6) {...};
     \node[font=\sffamily\tiny, gray] at (15,5.3) {P4--P$_{n-1}$};
 
-    % === MPI GATHER ARROWS ===
-    \draw[arrow, warningorange, line width=1.5pt] (p1.south) -- ++(0,-0.8) -| (2,-0.5);
-    \draw[arrow, warningorange, line width=1.5pt] (p2.south) -- ++(0,-1.2) -| (2,-0.5);
-    \draw[arrow, warningorange, line width=1.5pt] (p3.south) -- ++(0,-1.6) -| (2,-0.5);
-    \draw[arrow, secondarygreen, line width=1.5pt] (p0.south) -- (0,3);
+    % === MPI GATHER ARROWS (straight down into MPI box) ===
+    \draw[arrow, secondarygreen, line width=1.5pt] (p0.south) -- (0,3.8);
+    \draw[arrow, warningorange, line width=1.5pt] (p1.south) -- (4,3.8);
+    \draw[arrow, warningorange, line width=1.5pt] (p2.south) -- (8,3.8);
+    \draw[arrow, gray, line width=0.8pt, dashed] (p3.south) -- (12,3.8);
 
     % === MPI COLLECTIVE OPERATION BOX ===
     \node[rectangle, rounded corners=4pt, fill=accentlight, draw=accentpurple, line width=1.5pt,
           minimum width=10cm, minimum height=1.2cm] (mpi) at (6,3) {};
-    \node[font=\sffamily\bfseries, accentpurple] at (6,3) {MPI\_Gatherv: Collect variable-length data from all ranks};
+    \node[font=\sffamily\bfseries, accentpurple] at (6,3) {MPI\_Gatherv: Collect from all ranks};
+
+    % Arrow from MPI to merged
+    \draw[arrow, accentpurple, line width=1.5pt] (mpi.south) -- ++(0,-0.4) -| (4,1.8);
 
     % === MERGED OUTPUT ===
     \node[rectangle, rounded corners=4pt, fill=secondarylight, draw=secondarygreen, line width=1.5pt,
-          minimum width=5cm, minimum height=1.8cm] (merged) at (2,0.5) {};
-    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (2,1.3) {Merged Global Data};
-    \node[databox, fill=white, draw=primaryblue] at (2,0.6) {Total faces: 372};
-    \node[databox, fill=white, draw=warningorange] at (2,-0.1) {U,p,gradp[0..371]};
-
-    % Arrow from MPI to merged
-    \draw[arrow, accentpurple, line width=1.5pt] (6,2.3) -- (6,1.8) -| (2,1.4);
+          minimum width=5cm, minimum height=3.2cm] (merged) at (4,0.2) {};
+    \node[anchor=north, font=\sffamily\bfseries, secondarygreen] at (4,1.7) {Merged Global Data};
+    \node[databox, fill=white, draw=primaryblue] at (4,0.6) {Total faces: 372};
+    \node[databox, fill=white, draw=warningorange] at (4,-0.4) {U,p,gradp[0..371]};
 
     % === OUTPUT FILE ===
     \node[cylinder, shape border rotate=90, draw=warningorange, fill=warninglight,
-          minimum height=1.2cm, minimum width=2cm, aspect=0.25, line width=1.5pt] (file) at (10,0.5) {};
-    \node[font=\sffamily\small\bfseries, warningorange] at (10,0.5) {U,p,gradp.dvz[.zstd]};
+          minimum height=1.2cm, minimum width=2cm, aspect=0.25, line width=1.5pt] (file) at (11,0.5) {};
+    \node[font=\sffamily\small\bfseries, warningorange] at (11,0.5) {.dvz[.zstd]};
 
     % Arrow from merged to file
-    \draw[arrow, secondarygreen, line width=2pt] (4.5,0.5) -- node[above, font=\sffamily\footnotesize] {write} (8,0.5);
+    \draw[arrow, secondarygreen, line width=2pt] (merged.east) -- node[above, font=\sffamily\footnotesize] {write} (file.west);
 
     % === ANNOTATION: What happens each timestep ===
     \draw[decorate, decoration={brace, amplitude=8pt, mirror}, gray, line width=1pt]
-        (-1.5,4.5) -- (-1.5,8);
-    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (-2.2,6.25) {Each timestep};
-
-    % === FACE INTERPOLATION NOTE ===
-    \node[rectangle, rounded corners=3pt, fill=codebg, draw=codeframe,
-          text width=4.5cm, font=\sffamily\tiny, align=left, inner sep=4pt] at (13,-0.5) {
-        \textbf{Face interpolation:}\\
-        Cell values $\rightarrow$ face centers\\
-        using linear interpolation\\
-        \texttt{volPointInterpolation}
-    };
+        (-2,0.2) -- (-2,8);
+    \node[gray, rotate=90, anchor=south, font=\sffamily\footnotesize] at (-2.8,4.1) {Each timestep};
 \end{tikzpicture}
 \caption{Detailed MPI data gathering during parallel extraction. Each processor runs the \texttt{spaceTimeWindowExtract} function object, which identifies local boundary faces, interpolates field values to face centers, and participates in a collective gather operation. The master processor (P0) writes the merged data to a single file per timestep.}
 \label{fig:mpi-gathering}
@@ -982,20 +988,20 @@ The extracted data consists of two distinct components, illustrated in \cref{fig
 
     % Brace for "written once"
     \draw[decorate, decoration={brace, amplitude=5pt, mirror}, secondarygreen, line width=1pt]
-        (0.2,1.3) -- (0.2,2.9);
-    \node[secondarygreen, anchor=east, font=\sffamily\footnotesize, align=right] at (0,2.1) {Written\\once};
+        (-1.5,1.3) -- (-1.5,2.9);
+    \node[secondarygreen, anchor=east, font=\sffamily\footnotesize, align=right] at (-1.8,2.1) {Written\\once};
 
     % === BOUNDARY DATA (every timestep) ===
     \node[folder, fill=warninglight, draw=warningorange] (bcfolder) at (7,2.5) {Boundary Data};
 
     % Boundary data files for each timestep
-    \foreach \x in {3, 5, 7, 9, 11} {
+    \foreach \x in {3, 5, 7, 11, 13} {
         \node[file, fill=white, draw=warningorange, minimum width=1.2cm, font=\sffamily\tiny] at (\x,1.7) {U,p,gradp};
     }
-    \node[font=\sffamily\tiny, gray] at (9,1.7) {...};
+    \node[font=\sffamily\large, gray] at (9,1.7) {\ldots};
 
     % Arrows from timesteps to boundary data
-    \foreach \x in {3,5,7,9,11} {
+    \foreach \x in {3,5,7,11,13} {
         \draw[->, warningorange, line width=1pt] (\x,0.3) -- (\x,1.3);
     }
 
@@ -1008,17 +1014,17 @@ The extracted data consists of two distinct components, illustrated in \cref{fig
     \node[anchor=north west, font=\sffamily\bfseries] at (0,-1.5) {Storage Requirements:};
 
     % Initial fields size
-    \fill[secondarygreen!30] (0,-2.5) rectangle (2,-2);
-    \draw[secondarygreen, line width=1pt] (0,-2.5) rectangle (2,-2);
-    \node[anchor=west, font=\sffamily\footnotesize] at (2.2,-2.25) {Initial fields: $\mathcal{O}(N_\text{cells})$};
+    \fill[secondarygreen!30] (0,-3) rectangle (2,-2.5);
+    \draw[secondarygreen, line width=1pt] (0,-3) rectangle (2,-2.5);
+    \node[anchor=west, font=\sffamily\footnotesize] at (2.2,-2.75) {Initial fields: $\mathcal{O}(N_\text{cells})$};
 
     % Boundary data size (larger bar)
-    \fill[warningorange!30] (0,-3.3) rectangle (10,-2.8);
-    \draw[warningorange, line width=1pt] (0,-3.3) rectangle (10,-2.8);
-    \node[anchor=west, font=\sffamily\footnotesize] at (10.2,-3.05) {Boundary data: $\mathcal{O}(N_\text{faces} \times N_\text{timesteps})$};
+    \fill[warningorange!30] (0,-3.8) rectangle (7,-3.3);
+    \draw[warningorange, line width=1pt] (0,-3.8) rectangle (7,-3.3);
+    \node[anchor=west, font=\sffamily\footnotesize] at (7.2,-3.55) {Boundary data: $\mathcal{O}(N_\text{faces} \times N_\text{timesteps})$};
 
     % Note about compression
-    \node[anchor=north west, font=\sffamily\footnotesize, text width=12cm, bodytext] at (0,-3.8) {
+    \node[anchor=north west, font=\sffamily\footnotesize, text width=12cm, bodytext] at (0,-4.3) {
         $\rightarrow$ Boundary data dominates storage. Use \texttt{dvzt} format with integrated zstd for 300$\times$+ compression.
     };
 \end{tikzpicture}
@@ -1066,14 +1072,25 @@ The reconstruction is possible because the governing equations (Navier-Stokes fo
 
 Then knowing $\mathbf{u}(\mathbf{x}, t_0)$ for $\mathbf{x} \in \Omega$ (initial condition) and $\mathbf{u}(\mathbf{x}, t)$ for $\mathbf{x} \in \partial\Omega$, $t \in [t_0, t_n]$ (boundary data) is sufficient to uniquely determine $\mathbf{u}(\mathbf{x}, t)$ for all $\mathbf{x} \in \Omega$, $t \in [t_0, t_n]$.
 
-The reconstruction achieves ``bit-reproducible'' results when:
+The reconstruction closely reproduces the original solution when:
 \begin{enumerate}
     \item Time interpolation is disabled (\texttt{timeInterpolationScheme none})
     \item The reconstruction runs with the same timestep as extraction
     \item The same solver settings and numerical schemes are used
+    \item The initial fields are stored in binary (lossless) format
 \end{enumerate}
 
-With time interpolation enabled (recommended for practical use), the reconstruction closely approximates the original solution, with errors controlled by the interpolation scheme (linear or cubic Catmull-Rom spline).
+\begin{notebox}
+Even with exact boundary data and identical solver settings, the subdomain solution is \emph{not} bit-identical to the full-domain solution. This is a fundamental consequence of the finite volume discretisation: at internal faces, fluxes are computed from two neighbouring cell values using the full computational stencil, whereas at boundary faces with prescribed Dirichlet values, the flux uses the boundary value directly and the matrix contribution changes from an off-diagonal coefficient to a source term~\cite{Jasak1996, Moukalled2016}. In particular:
+\begin{itemize}
+    \item \textbf{TVD/high-resolution convective schemes} compute a limiter ratio from upstream and downstream cell values; at boundary faces the upstream stencil is truncated, altering the limiter behaviour~\cite{Ferziger2020, Jasak1996}.
+    \item \textbf{Multigrid pressure solvers} (e.g.\ GAMG) agglomerate cells into coarser levels; the coarsening pattern and the coarse-level matrix structure differ near Dirichlet boundaries compared to the interior~\cite{Ferziger2020}.
+    \item \textbf{Gradient reconstruction} (e.g.\ Gauss or least-squares) at boundary-adjacent cells uses the prescribed face value instead of a neighbour cell value, changing the gradient estimate~\cite{Moukalled2016}.
+\end{itemize}
+These effects are localised: errors are largest in cells adjacent to the extraction boundary and decay rapidly with distance (see \cref{sec:accuracy-comparison}).
+\end{notebox}
+
+With time interpolation enabled (recommended for practical use), the reconstruction closely approximates the original solution, with additional errors controlled by the interpolation scheme (linear or cubic Catmull-Rom spline).
 
 \subsection{Automatic Boundary Condition Configuration}
 \label{sec:concept-auto-bc}
@@ -1107,8 +1124,8 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
     },
     arrow/.style={->, line width=1.5pt}
 ]
-    % Title
-    \node[anchor=south, font=\sffamily\bfseries\large, primarydark] at (7,10) {Automatic BC Configuration by spaceTimeWindowInitCase};
+    % Title (above the dashed context box)
+    \node[anchor=south, font=\sffamily\bfseries\large, primarydark] at (7,11.2) {Automatic BC Configuration by spaceTimeWindowInitCase};
 
     % === INPUT: Extracted Data ===
     \node[box, fill=warninglight, draw=warningorange, minimum width=4cm] (input) at (0,8) {
@@ -1165,10 +1182,10 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
         \centering\textbf{Recommended Boundary Condition Assignment (oldInternalFaces patch)}
         \vspace{0.3em}
 
-        \begin{tabular}{@{}l@{\quad}l@{\quad}l@{}}
+        \begin{tabular}{@{}l@{\;}l@{\;}l@{}}
         \textbf{Field} & \textbf{Condition} & \textbf{Assigned BC} \\[0.3em]
         \textcolor{primaryblue}{U (velocity)} & Has U in boundaryData & \texttt{spaceTimeWindow} (Dirichlet) \\
-        \textcolor{secondarygreen}{p (pressure)} & Has p + gradp in boundaryData & \texttt{spaceTimeWindowCoupledPressure} \\
+        \textcolor{secondarygreen}{p (pressure)} & Has p + gradp data & \texttt{spaceTimeWindowCoupledPressure} \\
         \textcolor{warningorange}{nut, k, $\omega$} & No boundaryData & \texttt{zeroGradient} \\
         \end{tabular}
         \end{minipage}
@@ -1178,8 +1195,8 @@ A key feature of the spaceTimeWindow library is the \textbf{automatic configurat
     \draw[arrow, accentpurple] (7,5.6) -- (7,3.5);
 
     % === USER COMPUTER CONTEXT ===
-    \draw[dashed, gray, line width=1pt, rounded corners=8pt] (-2.5,3.8) rectangle (16.5,10.5);
-    \node[fill=white, font=\sffamily\footnotesize, gray] at (7,10.5) {Laptop / Desktop Computer (Offline Reconstruction)};
+    \draw[dashed, gray, line width=1pt, rounded corners=8pt] (-2.5,0) rectangle (16.5,10.5);
+    \node[fill=white, inner sep=5pt, font=\sffamily\normalsize\bfseries, text=gray!60!black] at (7,10.5) {Laptop / Desktop Computer (Offline Reconstruction)};
 \end{tikzpicture}
 \caption{Recommended boundary condition configuration for pressure-coupled reconstruction. The \texttt{spaceTimeWindowInitCase} utility can assign BCs based on available data: \texttt{spaceTimeWindow} for velocity (Dirichlet), \texttt{spaceTimeWindowCoupledPressure} for pressure (mixed Dirichlet/Neumann), and \texttt{zeroGradient} for turbulence fields.}
 \label{fig:auto-bc-config}
@@ -1192,7 +1209,7 @@ The reconstruction can run at \textbf{different mesh resolutions} than the origi
 \begin{itemize}
     \item \textbf{Coarser mesh}: Faster turnaround for exploratory analysis or debugging
     \item \textbf{Finer mesh}: Higher resolution studies without re-running the expensive global simulation
-    \item \textbf{Same resolution}: Bit-reproducible reconstruction for validation
+    \item \textbf{Same resolution}: Highest-fidelity reconstruction for validation
 \end{itemize}
 
 \Cref{fig:resolution-handling} shows how the \texttt{spaceTimeWindow} boundary condition automatically handles resolution differences at runtime.
@@ -1226,31 +1243,31 @@ The reconstruction can run at \textbf{different mesh resolutions} than the origi
     % === ARROWS TO DIFFERENT RESOLUTIONS ===
 
     % Arrow to coarser
-    \draw[arrow, gray, line width=1.5pt] (4.5,5.5) -- node[above, font=\sffamily\footnotesize, sloped] {coarsen} (7,6.5);
+    \draw[arrow, gray, line width=1.5pt] (4.5,5.5) -- node[above, font=\sffamily\footnotesize, sloped] {coarsen} (7,8.3);
 
     % Arrow to same
-    \draw[arrow, gray, line width=1.5pt] (4.5,4) -- node[above, font=\sffamily\footnotesize] {same} (7,4);
+    \draw[arrow, gray, line width=1.5pt] (4.5,4) -- node[above, font=\sffamily\footnotesize] {same} (7,3.3);
 
     % Arrow to finer
-    \draw[arrow, gray, line width=1.5pt] (4.5,2.5) -- node[below, font=\sffamily\footnotesize, sloped] {refine} (7,1.5);
+    \draw[arrow, gray, line width=1.5pt] (4.5,2.5) -- node[below, font=\sffamily\footnotesize, sloped] {refine} (7,-2);
 
     % === COARSER RECONSTRUCTION ===
-    \node[anchor=south, font=\sffamily\bfseries, secondarygreen] at (10,7.8) {Coarser};
-    \node[font=\sffamily\tiny, gray] at (10,7.4) {\texttt{-coarsenLevel 1}};
+    \node[anchor=south, font=\sffamily\bfseries, secondarygreen] at (10,9.8) {Coarser};
+    \node[font=\sffamily\tiny, gray] at (10,9.4) {\texttt{-coarsenLevel 1}};
 
-    \fill[secondarylight, opacity=0.5] (8,5.5) rectangle (12,7);
-    \draw[secondarygreen, line width=1.5pt] (8,5.5) -- (8,7);
+    \fill[secondarylight, opacity=0.5] (8,7.5) rectangle (12,9);
+    \draw[secondarygreen, line width=1.5pt] (8,7.5) -- (8,9);
 
     % Fewer target faces
-    \foreach \y in {5.8, 6.4} {
+    \foreach \y in {8.0, 8.6} {
         \fill[secondarygreen] (8,\y) circle (3pt);
     }
-    \node[font=\sffamily\tiny, secondarygreen, anchor=west] at (8.3,6.1) {2 faces};
+    \node[font=\sffamily\tiny, secondarygreen, anchor=west] at (8.3,8.3) {2 faces};
 
     % Interpolation method
     \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
-          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,5.2) {
-        Area-weighted\\averaging
+          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,7.2) {
+        Area-weighted averaging
     };
 
     % === SAME RESOLUTION ===
@@ -1260,38 +1277,38 @@ The reconstruction can run at \textbf{different mesh resolutions} than the origi
     \fill[accentlight, opacity=0.5] (8,2.5) rectangle (12,4);
     \draw[accentpurple, line width=1.5pt] (8,2.5) -- (8,4);
 
-    % Same number of faces
-    \foreach \y in {2.65, 2.95, 3.2, 3.55, 3.8} {
+    % Same number of faces (7, matching source)
+    \foreach \y in {2.65, 2.9, 3.15, 3.4, 3.55, 3.75, 3.95} {
         \fill[accentpurple] (8,\y) circle (3pt);
     }
-    \node[font=\sffamily\tiny, accentpurple, anchor=west] at (8.3,3.25) {7 faces};
+    \node[font=\sffamily\tiny, accentpurple, anchor=west] at (8.3,3.3) {7 faces};
 
     % Direct mapping
     \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
           font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,2.2) {
-        Direct 1:1\\mapping
+        Direct 1:1 mapping
     };
 
     % === FINER RECONSTRUCTION ===
-    \node[anchor=south, font=\sffamily\bfseries, warningorange] at (10,1.8) {Finer};
-    \node[font=\sffamily\tiny, gray] at (10,1.4) {\texttt{-refineLevel 1}};
+    \node[anchor=south, font=\sffamily\bfseries, warningorange] at (10,-0.2) {Finer};
+    \node[font=\sffamily\tiny, gray] at (10,-0.6) {\texttt{-refineLevel 1}};
 
-    \fill[warninglight, opacity=0.5] (8,-1) rectangle (12,1);
-    \draw[warningorange, line width=1.5pt] (8,-1) -- (8,1);
+    \fill[warninglight, opacity=0.5] (8,-3) rectangle (12,-1);
+    \draw[warningorange, line width=1.5pt] (8,-3) -- (8,-1);
 
-    % More target faces
-    \foreach \y in {-0.85, -0.55, -0.25, 0.05, 0.35, 0.65, 0.85} {
+    % More target faces (14)
+    \foreach \y in {-2.85, -2.55, -2.25, -1.95, -1.65, -1.35, -1.15} {
         \fill[warningorange] (8,\y) circle (2pt);
     }
-    \foreach \y in {-0.7, -0.4, -0.1, 0.2, 0.5, 0.75} {
+    \foreach \y in {-2.7, -2.4, -2.1, -1.8, -1.5, -1.25, -1.05} {
         \fill[warningorange] (8,\y) circle (2pt);
     }
-    \node[font=\sffamily\tiny, warningorange, anchor=west] at (8.3,0) {14 faces};
+    \node[font=\sffamily\tiny, warningorange, anchor=west] at (8.3,-2) {14 faces};
 
     % Interpolation method
     \node[rectangle, rounded corners=2pt, fill=codebg, draw=codeframe,
-          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,-1.3) {
-        Barycentric\\(Delaunay triangulation)
+          font=\sffamily\tiny, inner sep=2pt, text width=2.8cm, align=center] at (10,-3.3) {
+        Barycentric (Delaunay triangulation)
     };
 
     % === RUNTIME NOTE ===
@@ -1306,9 +1323,9 @@ The reconstruction can run at \textbf{different mesh resolutions} than the origi
     };
 
     % Arrows to runtime note
-    \draw[->, primaryblue, line width=1pt] (12.2,6.1) -- (12.8,4.5);
-    \draw[->, primaryblue, line width=1pt] (12.2,3.25) -- (12.8,3.25);
-    \draw[->, primaryblue, line width=1pt] (12.2,0) -- (12.8,2);
+    \draw[->, primaryblue, line width=1pt] (12.2,8.3) -- (12.8,4.5);
+    \draw[->, primaryblue, line width=1pt] (12.2,3.3) -- (12.8,3.3);
+    \draw[->, primaryblue, line width=1pt] (12.2,-2) -- (12.8,1.8);
 \end{tikzpicture}
 \caption{Resolution-independent reconstruction: The \texttt{spaceTimeWindow} boundary condition automatically handles mesh resolution differences between extraction and reconstruction. Spatial interpolation is performed on-the-fly during the simulation.}
 \label{fig:resolution-handling}
@@ -1370,7 +1387,7 @@ Similarly, the boundary condition handles \textbf{time interpolation} automatica
     \node[anchor=north, font=\sffamily\bfseries, accentpurple] at (14,-1.8) {None (Exact)};
     \node[font=\sffamily\tiny, text width=3.5cm, align=center] at (14,-2.8) {
         Requires exact match\\
-        Bit-reproducible
+        Highest fidelity
     };
 
     % Arrows showing which timesteps are used
@@ -1617,12 +1634,12 @@ For critical simulations, archive the encrypted reconstruction case to WORM stor
 \section{Boundary Condition Approaches}
 \label{sec:bc-approaches}
 
-The library provides three approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}):
+The library provides four approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}):
 
 \subsection{Pressure-Coupled BC --- Recommended}
 \label{sec:pressure-coupled-bc}
 
-The \textbf{recommended approach} for accurate reconstruction uses the \texttt{spaceTimeWindowCoupledPressure} boundary condition for pressure, which properly handles the elliptic nature of the pressure equation.
+The \textbf{recommended approach} for accurate reconstruction uses \texttt{spaceTime\-Window\-Coupled\-Pressure} for the pressure field, which properly handles its elliptic nature.
 
 \begin{itemize}
     \item \textbf{Velocity (U)}: \texttt{spaceTimeWindow} --- pure Dirichlet from extracted data
@@ -1673,6 +1690,141 @@ oldInternalFaces
 The pressure-coupled approach requires extracting pressure gradients during extraction. Enable this with \texttt{extractGradients true} and \texttt{gradientFields (p)} in the extraction configuration. See \cref{sec:config-extract} for details.
 \end{notebox}
 
+\subsection{Precise BC (\texttt{-preciseBC}) --- Highest Fidelity Reconstruction}
+\label{sec:precise-bc}
+
+The \texttt{-preciseBC} approach is the most "accurate" reconstruction option, using the intermediate velocity $\mathbf{u}^* = H(\mathbf{U})/A$ (commonly written \texttt{HbyA} in OpenFOAM) instead of the final velocity $\mathbf{U}$ as the boundary condition for the velocity field. 
+
+In OpenFOAM this involves modifying the solver to expose \texttt{HbyA} to function objects.
+
+\begin{itemize}
+    \item \textbf{Velocity (U)}: \texttt{spaceTimeWindow} with \texttt{fieldTableName HbyA} --- reads extracted $\mathbf{u}^*$ data
+    \item \textbf{Pressure (p)}: \texttt{spaceTimeWindowCoupledPressure} --- mixed Dirichlet/Neumann based on flux
+    \item \textbf{Turbulence fields}: \texttt{zeroGradient}
+\end{itemize}
+
+\textbf{Why $\mathbf{u}^*$ is the theoretically optimal boundary condition:}
+
+In the PIMPLE algorithm, the pressure Poisson equation is:
+\[
+    \nabla \cdot \left( \frac{1}{A} \nabla p \right) = \nabla \cdot \mathbf{u}^*
+\]
+
+The intermediate velocity $\mathbf{u}^*$ is the \emph{source term} of the pressure equation. If $\mathbf{u}^*$ is prescribed exactly on the boundary, the pressure equation on the subdomain becomes identical to the pressure equation on the full domain (restricted to the subdomain).
+
+Wu et al.~\cite{Wu2020} in 2020 demonstrated machine-precision pressure recovery using this approach in a DNS context for compressing turbulence databases. Two factors contribute to this: (i) very high spatial resolution minimizes the difference between full-domain and subdomain discretization stencils at boundary cells, and (ii) DNS codes typically employ spectral or direct (non-iterative) pressure solvers that yield machine-precision solutions, unlike the iterative solvers (e.g.\ GAMG) used in finite-volume codes such as OpenFOAM. On practical LES/RANS meshes with iterative solvers, a measurable reconstruction error remains (see \cref{sec:accuracy-comparison}), even when:
+\begin{itemize}
+    \item Face values use OpenFOAM's exact distance-weighted interpolation formula (no spatial interpolation error), and
+    \item Boundary data is available at every solver timestep (no temporal interpolation error).
+\end{itemize}
+The remaining error arises from the inherent difference between solving the non-linear PIMPLE equations on a full domain versus on a subdomain with prescribed boundary conditions~\cite{Jasak1996, Moukalled2016}. At boundary faces, the discretization changes from an internal-face stencil (using neighbor cell values) to a Dirichlet BC stencil. While the Laplacian gradient is algebraically identical, the non-linear convective terms, TVD/upwind flux limiters, and the multigrid pressure solver all behave differently at boundary faces~\cite{Ferziger2020, Jasak1996}, introducing small differences that compound over timesteps. It is worth noting that LES and RANS are by definition approximate solutions---the turbulence closure models introduce modelling errors that are typically orders of magnitude larger than the reconstruction error. Nevertheless, \texttt{-preciseBC} remains the most accurate option because it provides the theoretically exact source term for the pressure equation.
+
+In contrast, using the final velocity $\mathbf{U}$ (which satisfies $\nabla \cdot \mathbf{U} = 0$) provides a divergence-free boundary condition that carries no information about the pressure source term, requiring the coupled pressure BC to reconstruct the missing information through blending.
+
+\textbf{Requirements:}
+\begin{itemize}
+    \item The extraction must be performed with \texttt{pimpleFoamPrecise} (see \cref{sec:pimpleFoamPrecise}), which registers $\mathbf{u}^*$ as \texttt{HbyA} in the objectRegistry
+    \item The extraction function object must use \texttt{fields (HbyA p)} with \texttt{extractGradients true} and \texttt{gradientFields (p)}
+\end{itemize}
+
+\begin{lstlisting}[language=OpenFOAM,caption={Precise boundary conditions (with \texttt{-preciseBC})}]
+// In 0/U (reads HbyA data, applied to U field)
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    fieldTableName  HbyA;       // Read HbyA data files for this field
+    fixesValue      true;
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform (0 0 0);
+}
+
+// In 0/p (same as pressure-coupled)
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    blendingMode    fluxMagnitude;
+    dirichletWeight 0.8;
+    neumannWeight   0.8;
+    transitionWidth 0.1;
+    allowTimeInterpolation  true;
+    timeInterpolationScheme cubic;
+    value           uniform 0;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash,caption={Using precise BC}]
+# Extraction with pimpleFoamPrecise
+cd source-case
+pimpleFoamPrecise    # Registers HbyA in objectRegistry
+
+# Initialization with -preciseBC
+cd ../subset-case
+spaceTimeWindowInitCase -sourceCase ../source-case -preciseBC
+
+# Reconstruction with standard pimpleFoam
+pimpleFoam
+\end{lstlisting}
+
+\begin{tipbox}
+The \texttt{-preciseBC} approach is the highest-fidelity option available. It yields continuity errors $\sim 10^{-19}$ (machine epsilon), compared to the standard pressure-coupled approach which is accurate to solver tolerance ($\sim 10^{-6}$). The remaining reconstruction error arises from the non-linear discretization difference between internal faces (full domain) and Dirichlet boundary faces (subdomain)~\cite{Jasak1996, Moukalled2016, Ferziger2020}, not from any interpolation.
+\end{tipbox}
+
+\subsection{Accuracy Comparison}
+\label{sec:accuracy-comparison}
+
+A quantitative comparison between \texttt{-preciseBC} (using $\mathbf{u}^*$ + $\nabla p$) and the standard pressure-coupled BC (using $\mathbf{U}$ + $\nabla p$) was performed on the UFR2-02 square cylinder case (110\,720 cells full domain, 47\,952 cells subset, 88 timesteps with $\Delta t = 10^{-4}$, no time interpolation, binary uncompressed data throughout).
+
+\begin{table}[h]
+\centering
+\caption{Internal field errors after 88 timesteps: subset vs.\ full domain}
+\label{tab:accuracy-comparison}
+\begin{tabular}{l c c c c}
+\toprule
+ & \multicolumn{2}{c}{\textbf{Velocity $\mathbf{U}$}} & \multicolumn{2}{c}{\textbf{Pressure $p$}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+\textbf{Method} & $L_\infty$ & $L_2$ & $L_\infty$ & $L_2$ \\
+\midrule
+\texttt{-preciseBC} ($\mathbf{u}^*$ + $\nabla p$) & $3.71 \times 10^{-3}$ & $3.07 \times 10^{-4}$ & $2.19 \times 10^{-3}$ & $3.22 \times 10^{-4}$ \\
+Coupled pressure ($\mathbf{U}$ + $\nabla p$) & $3.65 \times 10^{-3}$ & $3.10 \times 10^{-4}$ & $2.65 \times 10^{-3}$ & $3.50 \times 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both methods start from identical binary initial conditions (zero error at $t_0$). Key observations:
+\begin{itemize}
+    \item \textbf{Velocity errors are nearly identical} between the two methods --- the choice of $\mathbf{u}^*$ vs.\ $\mathbf{U}$ for the velocity BC has negligible effect on velocity reconstruction.
+    \item \textbf{Pressure errors are $\sim$20\% lower with \texttt{-preciseBC}}: $L_\infty = 2.19 \times 10^{-3}$ vs.\ $2.65 \times 10^{-3}$.
+    \item \textbf{Errors are concentrated near the boundary.} Only 0.25\% of cells exceed 90\% of the maximum error. The top-10 worst cells are all at $x = 0.055$ (one cell layer from the extraction box face at $x = 0.05$).
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Error decay with distance from the \texttt{oldInternalFaces} boundary (\texttt{-preciseBC})}
+\label{tab:error-vs-distance}
+\begin{tabular}{l r c c c c}
+\toprule
+\textbf{Distance from boundary} & \textbf{Cells} & \multicolumn{2}{c}{\textbf{$\mathbf{U}$ error}} & \multicolumn{2}{c}{\textbf{$p$ error}} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6}
+ & & Mean & Max & Mean & Max \\
+\midrule
+0.005--0.01\,(1 cell layer) & 1\,296 & $1.2 \times 10^{-3}$ & $3.7 \times 10^{-3}$ & $1.0 \times 10^{-3}$ & $2.2 \times 10^{-3}$ \\
+0.01--0.02 & 5\,040 & $2.5 \times 10^{-4}$ & $9.9 \times 10^{-4}$ & $4.0 \times 10^{-4}$ & $1.5 \times 10^{-3}$ \\
+0.02--0.05 & 12\,384 & $1.1 \times 10^{-4}$ & $6.5 \times 10^{-4}$ & $2.4 \times 10^{-4}$ & $8.3 \times 10^{-4}$ \\
+0.05--0.10 & 15\,156 & $4.5 \times 10^{-5}$ & $2.9 \times 10^{-4}$ & $1.5 \times 10^{-4}$ & $7.5 \times 10^{-4}$ \\
+0.10--0.20 & 14\,076 & $1.2 \times 10^{-5}$ & $9.2 \times 10^{-5}$ & $5.3 \times 10^{-5}$ & $5.5 \times 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In this comparison, no temporal interpolation is used (boundary data is available at every solver timestep) and the face values are computed using OpenFOAM's exact distance-weighted linear interpolation formula ($\phi_f = w \, \phi_{\text{inside}} + (1-w) \, \phi_{\text{outside}}$). Despite this, a reconstruction error remains. It arises from the non-linear discretization difference between full-domain internal faces and subdomain Dirichlet boundary faces~\cite{Jasak1996, Moukalled2016}: convective flux limiters (TVD/upwind), the multigrid pressure solver (GAMG), and the PIMPLE outer correction loop all behave differently at boundary faces~\cite{Ferziger2020}, introducing small differences that compound over the 88 timesteps.
+
+\begin{notebox}
+Wu et al.~\cite{Wu2020} in 2020 report machine-precision pressure recovery in a DNS setting. Two factors explain this: the very high spatial resolution of DNS minimizes the discretization stencil mismatch at boundary cells, and DNS codes typically use spectral or direct (non-iterative) pressure solvers that produce exact solutions. In contrast, finite-volume LES/RANS codes like OpenFOAM use iterative solvers (GAMG) that converge to a tolerance, and coarser grids amplify the stencil mismatch, leading to the measured errors. Moreover, LES and RANS are inherently approximate---turbulence closure models introduce modelling errors that dwarf the reconstruction error. The advantage of $\mathbf{u}^*$ is most visible in the pressure field near the boundary ($\sim$20\% lower $L_\infty$).
+\end{notebox}
+
 \subsection{Inlet-Outlet BC (\texttt{-inletOutletBC}) --- For Quick Tests}
 \label{sec:inlet-outlet-bc}
 
@@ -1713,7 +1865,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 \end{lstlisting}
 
 \begin{warningbox}
-These options (\texttt{-inletOutletBC} and \texttt{-outletDirection}) are mutually exclusive. Using both together produces an error with guidance.
+The options \texttt{-preciseBC}, \texttt{-inletOutletBC}, and \texttt{-outletDirection} are mutually exclusive. Using incompatible combinations produces an error with guidance.
 \end{warningbox}
 
 \subsection{Boundary Condition Assignment Logic}
@@ -1724,19 +1876,25 @@ For each field in the initial time directory, \texttt{spaceTimeWindowInitCase} a
 \centering
 \caption{Boundary condition assignment logic}
 \label{tab:bc-assignment}
-\begin{tabularx}{\textwidth}{@{}lllX@{}}
+\small
+\begin{tabularx}{\textwidth}{@{}llll>{\raggedright\arraybackslash}X@{}}
 \toprule
-\textbf{In boundaryData?} & \textbf{-inletOutletBC?} & \textbf{Field Type} & \textbf{BC Applied} \\
+\textbf{Mode} & \textbf{Field} & \textbf{In BD?} & \textbf{Type} & \textbf{BC Applied} \\
 \midrule
-Yes & Yes & vector (U) & \texttt{spaceTimeWindowInletOutlet} \\
-Yes & Yes & scalar & \texttt{zeroGradient} \\
-Yes & No & any & \texttt{spaceTimeWindow} (Dirichlet) \\
-No & any & any & \texttt{zeroGradient} \\
+\texttt{-preciseBC} & U & --- & vector & \texttt{spaceTimeWindow} + \texttt{fieldTableName HbyA} \\
+\texttt{-preciseBC} & p & --- & scalar & \texttt{spaceTimeWindowCoupledPressure} \\
+\texttt{-preciseBC} & other & No & any & \texttt{zeroGradient} \\
+\midrule
+\texttt{-inletOutletBC} & --- & Yes & vector & \texttt{spaceTimeWindowInletOutlet} \\
+\texttt{-inletOutletBC} & --- & Yes & scalar & \texttt{zeroGradient} \\
+\midrule
+default & --- & Yes & any & \texttt{spaceTimeWindow} (Dirichlet) \\
+any & --- & No & any & \texttt{zeroGradient} \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-This ensures fields without time-varying data automatically get appropriate BCs.
+This ensures fields without time-varying data automatically get appropriate BCs. With \texttt{-preciseBC}, the U and p fields are handled specially regardless of boundaryData contents (U reads HbyA data via \texttt{fieldTableName}).
 
 % ----------------------------------------------------------------------------
 % WORKFLOW
@@ -1951,17 +2109,27 @@ The extraction can separate which fields are used for:
     \item \textbf{Time-varying boundary data} (\texttt{fields}): Fields written to \texttt{boundaryData/} for time-varying BCs
 \end{itemize}
 
-For the recommended pressure-coupled approach:
+For the highest-fidelity approach with \texttt{-preciseBC} (requires \texttt{pimpleFoamPrecise}):
 
-\begin{lstlisting}[language=OpenFOAM,caption={Field selection strategy for pressure-coupled BC (RECOMMENDED)}]
-// In extraction function object
+\begin{lstlisting}[language=OpenFOAM,caption={Field selection for precise BC (highest fidelity)}]
+// In extraction function object (run with pimpleFoamPrecise)
+fields          (HbyA p);         // HbyA (intermediate velocity) and p for time-varying BC
+initialFields   (U p nut);        // U (final velocity) needed for solver initialization
+extractGradients    true;         // Enable gradient extraction
+gradientFields      (p);          // Extract normal gradient of p (creates gradp)
+\end{lstlisting}
+
+For the standard pressure-coupled approach:
+
+\begin{lstlisting}[language=OpenFOAM,caption={Field selection strategy for pressure-coupled BC}]
+// In extraction function object (run with pimpleFoam)
 fields          (U p);             // U and p for time-varying BC
 initialFields   (U p nut);         // nut needed for turbulence model
 extractGradients    true;          // Enable gradient extraction
 gradientFields      (p);           // Extract normal gradient of p (creates gradp)
 \end{lstlisting}
 
-Note: \texttt{nut} is only needed in \texttt{initialFields} (not in \texttt{fields}) because turbulent viscosity is computed by the turbulence model at runtime and uses \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
+Note: \texttt{nut} is only needed in \texttt{initialFields} (not \texttt{fields}) since the turbulence model computes it at runtime and uses \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
 
 Fields NOT in \texttt{boundaryData} automatically get \texttt{zeroGradient} BC on \texttt{oldInternalFaces}.
 
@@ -2017,8 +2185,11 @@ boundaryField
     \item Computes local flux at each face
     \item Calculates blending weight using smooth tanh transition based on the selected mode:
     \begin{itemize}
-        \item \texttt{fluxMagnitude}: $w = w_D + (w_N' - w_D) \cdot \tanh(|\phi_f| / \phi_{\max} / \sigma)$ --- where $w_D$ is \texttt{dirichletWeight} and $w_N' = 1 - w_N$
-        \item \texttt{flowDirection}: $w = \frac{1}{2}\left((w_D + w_N') - (w_D - w_N') \cdot \tanh(\phi_f / \phi_{\max} / \sigma)\right)$
+        \item \texttt{fluxMagnitude}:
+        \[ w = w_D + (w_N' - w_D) \cdot \tanh\!\bigl(|\phi_f| / \phi_{\max} / \sigma\bigr) \]
+        where $w_D$ is \texttt{dirichletWeight} and $w_N' = 1 - w_N$
+        \item \texttt{flowDirection}:
+        \[ w = \tfrac{1}{2}\bigl[(w_D + w_N') - (w_D - w_N') \cdot \tanh\!\bigl(\phi_f / \phi_{\max} / \sigma\bigr)\bigr] \]
     \end{itemize}
     \item In \texttt{fluxMagnitude} mode: at \textbf{stagnant faces} ($w \to w_D$) applies Dirichlet; at \textbf{high-flux faces} ($w \to w_N'$) applies Neumann
     \item In \texttt{flowDirection} mode: at \textbf{inflow faces} ($w \to w_D$) applies Dirichlet; at \textbf{outflow faces} ($w \to w_N'$) applies Neumann
@@ -2150,7 +2321,13 @@ Use this for:
 The \texttt{spaceTimeWindowInitCase} utility accepts command-line options (see \cref{tab:init-options}):
 
 \begin{lstlisting}[language=bash,caption={spaceTimeWindowInitCase usage}]
-# Recommended: inlet-outlet BC for unsteady turbulent flows
+# Highest fidelity: precise BC (requires pimpleFoamPrecise extraction)
+spaceTimeWindowInitCase -sourceCase ../source-case -preciseBC
+
+# Standard: pressure-coupled BC (default, no flag needed)
+spaceTimeWindowInitCase -sourceCase ../source-case
+
+# Quick tests: inlet-outlet BC
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 
 # Alternative: fixed outlet direction for steady-mean flows
@@ -2170,6 +2347,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 \midrule
 \texttt{-sourceCase} & directory & Source case where extraction ran (required) \\
 \texttt{-extractDir} & directory & Directory with extracted data (default: cwd) \\
+\texttt{-preciseBC} & flag & Use HbyA-based velocity BC and coupledPressure for p (requires \texttt{pimpleFoamPrecise} extraction) \\
 \texttt{-inletOutletBC} & flag & Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) \\
 \texttt{-outletDirection} & vector & Create fixed outlet patch in given direction (e.g., ``(1 0 0)'') \\
 \texttt{-outletFraction} & scalar & Fraction of box extent for outlet region (default: 0.1) \\
@@ -2183,7 +2361,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 \end{table}
 
 \begin{warningbox}
-\texttt{-inletOutletBC} and \texttt{-outletDirection} are mutually exclusive. Using both together produces an error with guidance on which option to choose.
+\texttt{-preciseBC}, \texttt{-inletOutletBC}, and \texttt{-outletDirection} are mutually exclusive. Using incompatible combinations produces an error with guidance on which option to choose.
 \end{warningbox}
 
 \subsection{Mesh Coarsening and Refinement}
@@ -2979,23 +3157,23 @@ Enhanced codec that exploits both spatial and temporal correlation for better co
     \node[font=\tiny\sffamily, color=bodytext] at (6.25,4.25) {compact storage};
 
     % Arrow
-    \draw[-{Stealth[length=3mm]}, thick, warningorange] (7.7,4.5) -- (8.8,4.5);
+    \draw[-{Stealth[length=3mm]}, thick, warningorange] (7.7,4.5) -- (8.3,4.5);
 
     % InitCase
-    \draw[secondarygreen, thick, fill=secondarylight, rounded corners=4pt] (9,4) rectangle (12.5,5);
-    \node[font=\small\sffamily\bfseries, color=secondarygreen] at (10.75,4.65) {spaceTimeWindowInitCase};
+    \draw[secondarygreen, thick, fill=secondarylight, rounded corners=4pt] (8.5,4) rectangle (13,5);
+    \node[font=\scriptsize\sffamily\bfseries, color=secondarygreen] at (10.75,4.65) {spaceTimeWindowInitCase};
     \node[font=\tiny\sffamily, color=bodytext] at (10.75,4.25) {converts to .dvz[.zstd]};
 
     % Arrow down
     \draw[-{Stealth[length=3mm]}, thick, warningorange] (10.75,3.8) -- (10.75,3.2);
 
     % DVZ files
-    \draw[primaryblue, thick, fill=primarylight, rounded corners=4pt] (9,2.2) rectangle (12.5,3);
+    \draw[primaryblue, thick, fill=primarylight, rounded corners=4pt] (8.5,2.2) rectangle (13,3);
     \node[font=\small\sffamily\bfseries, color=primarydark] at (10.75,2.85) {.dvz[.zstd]};
     \node[font=\tiny\sffamily, color=bodytext] at (10.75,2.45) {self-contained timesteps};
 
     % Arrow
-    \draw[-{Stealth[length=3mm]}, thick, warningorange] (8.8,2.6) -- (7.7,2.6);
+    \draw[-{Stealth[length=3mm]}, thick, warningorange] (8.3,2.6) -- (7.7,2.6);
 
     % Runtime
     \draw[warningorange, thick, fill=warninglight, rounded corners=4pt] (5,2.2) rectangle (7.5,3);
@@ -3470,8 +3648,11 @@ The recommended mass conservation strategies are summarized in \cref{tab:mass-st
 \toprule
 \textbf{Configuration} & \textbf{Description} \\
 \midrule
+\texttt{-preciseBC} &
+\textbf{Highest fidelity}. Most accurate pressure recovery using HbyA ($\mathbf{u}^*$). Requires \texttt{pimpleFoamPrecise} extraction. \\
+\addlinespace
 \texttt{-inletOutletBC} &
-\textbf{Recommended} for unsteady turbulent flows (vortex shedding, etc.). Natural mass balance through flux-based switching. \\
+Recommended for quick tests. Natural mass balance through flux-based switching. \\
 \addlinespace
 \texttt{-inletOutletBC -correctMassFlux} &
 Unsteady turbulent + extra safety. Ensures exact mass balance with inlet-outlet switching. \\
@@ -3480,7 +3661,7 @@ Unsteady turbulent + extra safety. Ensures exact mass balance with inlet-outlet 
 Steady-mean flow direction. Use when outlet location is known and flow direction is consistent. \\
 \addlinespace
 \texttt{-correctMassFlux} (no outlet) &
-Maximum fidelity. All faces prescribed with exact mass balance. \\
+All faces prescribed with exact mass balance. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -3597,7 +3778,7 @@ The boundary conditions support three time interpolation modes, summarized in \C
 \toprule
 \textbf{Mode} & \textbf{Start Time} & \textbf{Timesteps Used} & \textbf{Use Case} \\
 \midrule
-\texttt{none} (exact) & $t_0$ & 1 (exact match) & ``Bit''-reproducible results \\
+\texttt{none} (exact) & $t_0$ & 1 (exact match) & Highest fidelity (no interpolation error) \\
 \texttt{linear} & $t_1$ & 2 (bracketing) & Simple, smoothly varying flows \\
 \texttt{cubic} & $t_2$ & 4 (Catmull-Rom) & Unsteady turbulent flows (recommended) \\
 \bottomrule
@@ -3808,7 +3989,7 @@ By default, the boundary condition requires exact timestep matching:
 \begin{itemize}
     \item Simulation time must match available sample times (within 1\% of \texttt{deltaT})
     \item Fatal error if no matching timestep found
-    \item Ensures ``bit''-reproducible results (highest fidelity)
+    \item Ensures highest fidelity (no time interpolation error)
 \end{itemize}
 
 \subsection{Linear Interpolation}
@@ -4013,13 +4194,50 @@ Failed to decrypt file: constant/boundaryData/.../U.dvz.zstd.enc
 \end{enumerate}
 
 % ----------------------------------------------------------------------------
+% ACKNOWLEDGING THIS WORK
+% ----------------------------------------------------------------------------
+
+\section{Acknowledging this work}
+\label{sec:acknowledging}
+
+If this software has been useful in your research, please consider citing:
+
+\begin{quote}
+Anton, A.-A. (2011). \emph{``Space-Time Window Reconstruction in Parallel High Performance Numeric Simulations. Application for CFD''}, PhD Thesis, Politehnica University of Timisoara. Available at: \url{https://dspace.upt.ro/jspui/handle/123456789/643}
+\end{quote}
+
+\begin{lstlisting}[language=bash,caption={BibTeX entry}]
+@phdthesis{Anton2011,
+  author    = "Alin-Adrian Anton",
+  title     = "Space-Time Window Reconstruction in High-Performance
+               Numeric Simulations: Application for {CFD}",
+  school    = "Universitatea Politehnica Timi\c{s}oara",
+  year      = "2011",
+  month     = "November",
+  type      = "PhD thesis",
+  address   = "Timi\c{s}oara, Romania",
+  publisher = "Editura Politehnica",
+  isbn      = "978-606-554-390-4",
+  url       = "https://dspace.upt.ro/jspui/handle/123456789/643"
+}
+\end{lstlisting}
+
+Or acknowledge: ``This work made use of the openfoam-spaceTimeWindow library available at \url{https://github.com/cherubimro/openfoam-spaceTimeWindow} / .''
+
+Secondary link: \url{https://dev.cs.upt.ro/alin.anton/openfoam-spaceTimeWindow}.
+
+% ----------------------------------------------------------------------------
 % ACKNOWLEDGMENTS
 % ----------------------------------------------------------------------------
 
 \section{Acknowledgments}
 \label{sec:acknowledgments}
 
-This library implements the space-time window reconstruction method developed in~\cite{Anton2011}. The example case uses mesh generation from the ERCOFTAC Classic Collection Database~\cite{ERCOFTAC043}.
+This library implements the space-time window reconstruction concept~\cite{Anton2011, Anton2011b}.
+
+The example case uses mesh generation from the ERCOFTAC Classic Collection Database~\cite{ERCOFTAC043}.
+
+The square cylinder benchmark setup was published by Niklas Nordin~\cite{Niklas2010}.
 
 % ----------------------------------------------------------------------------
 % APPENDICES
@@ -4217,6 +4435,17 @@ pimpleFoam
 \end{lstlisting}
 
 \subsection{Validation}
+\label{sec:validation}
+
+\subsubsection{CFD Validation Philosophy}
+
+In computational fluid dynamics, validation means demonstrating that a simulation reproduces the \emph{physics} of the flow---not that it produces bit-identical numbers. A validated CFD result agrees with experimental measurements (velocity profiles, pressure distributions, turbulent statistics, shedding frequencies, etc.) within quantified uncertainties. Different meshes, turbulence models, numerical schemes, and even different software packages will produce numerically different fields, yet all of them can be equally ``valid'' if they capture the physical phenomena to the required accuracy.
+
+This distinction is central to the space-time window approach. The reconstruction does not aim to be a bit-exact copy of the original simulation; it aims to be a \emph{physically faithful} re-simulation of the same flow inside the region of interest. The governing equations, boundary conditions, and fluid properties are identical; what changes is the domain extent and, optionally, the mesh resolution. The reconstructed fields are therefore validated in the same way as any other CFD result: by comparing physical quantities against reference data (experiment or a trusted full-domain simulation).
+
+A concrete example of this validation philosophy in OpenFOAM is the Timi\c{s}oara Swirl Generator~\cite{Petit2011}, a turbomachinery test rig developed at Politehnica University of Timi\c{s}oara featuring guide vanes, a free runner with 10 blades, and a convergent-divergent draft tube. Petit et al.\ performed unsteady simulations using OpenFOAM's \texttt{transientSimpleDyMFoam} solver on a block-structured hexahedral mesh with GGI interfaces, and validated the results against Laser Doppler Velocimetry (LDV) measurements and unsteady pressure recordings at multiple stations in the draft tube~\cite{Petit2011}. The validation criteria were physical: mean and fluctuating velocity profiles, pressure recovery, and vortex rope frequency---not numerical identity with any previous computation. This case, documented on the OpenFOAM Wiki\footnote{\url{https://openfoamwiki.net/index.php/Sig_Turbomachinery_/_Timisoara_Swirl_Generator}}, illustrates the general principle that CFD validation is always performed against the physics of the flow.
+
+\subsubsection{Validating the Reconstruction}
 
 The reconstruction can be validated by comparing:
 
@@ -4227,8 +4456,10 @@ The reconstruction can be validated by comparing:
     \item Reynolds stress components
 \end{itemize}
 
+Because the reconstruction solves the same equations with the same physical parameters, any discrepancy with the full-domain solution is due to the finite-volume discretisation change at the extraction boundary (see \cref{sec:concept-why}), not to different physics. These errors are localised near the boundary and decay rapidly with distance, as demonstrated by the accuracy comparison in \cref{sec:accuracy-comparison}.
+
 \begin{notebox}
-The reconstruction should exactly reproduce the original flow within the extraction region (to solver tolerance) when using exact timestep matching. Small differences may occur at the outlet boundary due to the different boundary condition type.
+The reconstruction should closely reproduce the original flow within the extraction region (to solver tolerance) when using exact timestep matching. Small differences may occur at the outlet boundary due to the different boundary condition type. When the mesh resolution is changed (refinement or coarsening), additional spatial interpolation errors appear, but the physical behaviour---vortex dynamics, mean profiles, spectral content---is preserved.
 \end{notebox}
 
 \section{Field Selection by Turbulence Model}
@@ -4253,6 +4484,74 @@ Spalart-Allmaras & \texttt{(U p nut nuTilda)} \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\section{The \texttt{pimpleFoamPrecise} Solver}
+\label{sec:pimpleFoamPrecise}
+
+The \texttt{pimpleFoamPrecise} solver is a modified version of OpenFOAM's standard \texttt{pimpleFoam} that registers the intermediate velocity $\mathbf{u}^* = H(\mathbf{U})/A$ (named \texttt{HbyA}) in the objectRegistry, making it accessible to function objects such as \texttt{spaceTimeWindowExtract}.
+
+\subsection{Motivation}
+
+In the PIMPLE algorithm, the momentum equation is semi-discretized as:
+\[
+    A \mathbf{U} = H(\mathbf{U}) - \nabla p
+\]
+
+The intermediate velocity $\mathbf{u}^* = H(\mathbf{U})/A$ is computed before the pressure correction step. The pressure Poisson equation is then:
+\[
+    \nabla \cdot \left( \frac{1}{A} \nabla p \right) = \nabla \cdot \mathbf{u}^*
+\]
+
+Wu, Zaki, and Meneveau~\cite{Wu2020} in 2020 showed that using $\mathbf{u}^*$ instead of the final divergence-free velocity $\mathbf{U}$ as the boundary condition for subdomain reconstruction yields the highest fidelity pressure recovery. In their DNS context (very fine grids), the high resolution minimizes the non-linear discretization stencil mismatch between full-domain internal faces and subdomain boundary faces~\cite{Jasak1996, Moukalled2016}, and the use of spectral/direct (non-iterative) pressure solvers yields exact solutions, together achieving machine-precision accuracy. On coarser LES/RANS meshes with iterative solvers (e.g.\ GAMG), the mismatch is larger, though it remains negligible compared to the inherent modelling error of turbulence closures. $\mathbf{u}^*$ remains the theoretically optimal choice: it is the source term of the pressure equation, so prescribing it on the boundary makes the subdomain pressure equation consistent with the full-domain one. The boundary data uses OpenFOAM's exact distance-weighted interpolation formula, and when extraction is performed at every solver timestep no temporal interpolation is needed.
+
+\subsection{Implementation}
+
+The solver differs from standard \texttt{pimpleFoam} in two files:
+
+\begin{itemize}
+    \item \textbf{\texttt{createFields.H}}: Declares a persistent \texttt{volVectorField} named \texttt{HbyA\_stored} with \texttt{IOobject::REGISTER} that survives across the time loop.  This is necessary because the local \texttt{HbyA} variable in \texttt{pEqn.H} is stack-allocated and its destructor unregisters it from the objectRegistry before function objects execute.
+
+    \item \textbf{\texttt{pEqn.H}}: Copies the computed \texttt{HbyA} to the persistent field via \texttt{HbyA\_stored~=~HbyA} at every PIMPLE pressure correction iteration.
+\end{itemize}
+
+\begin{lstlisting}[language=C++,caption={Persistent HbyA field in createFields.H}]
+// Persistent HbyA field for function object access
+volVectorField HbyA_stored
+(
+    IOobject
+    (
+        "HbyA",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        IOobject::NO_WRITE,
+        IOobject::REGISTER
+    ),
+    mesh,
+    dimensionedVector(dimVelocity, Zero)
+);
+\end{lstlisting}
+
+\begin{warningbox}
+The \texttt{IOobject::REGISTER} flag is essential in OpenFOAM v2512. Without it, the field is not found by \texttt{mesh.findObject<volVectorField>("HbyA")} in the extractor function object.
+\end{warningbox}
+
+\subsection{Usage}
+
+Use \texttt{pimpleFoamPrecise} as a drop-in replacement for \texttt{pimpleFoam} during the extraction phase:
+
+\begin{lstlisting}[language=bash,caption={Using pimpleFoamPrecise for extraction}]
+# In source case controlDict: application pimpleFoamPrecise;
+# Extraction function object uses: fields (HbyA p);
+cd source-case
+pimpleFoamPrecise
+\end{lstlisting}
+
+The reconstruction phase uses standard \texttt{pimpleFoam} --- no special solver is needed for reconstruction.
+
+\begin{notebox}
+\texttt{pimpleFoamPrecise} adds negligible overhead compared to standard \texttt{pimpleFoam}. The only additional cost is a single field copy (\texttt{HbyA\_stored = HbyA}) per pressure correction iteration.
+\end{notebox}
 
 % ----------------------------------------------------------------------------
 % REFERENCES

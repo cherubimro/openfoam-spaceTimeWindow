@@ -22,7 +22,77 @@ This library provides components for extracting a spatial subset from a full LES
 
 The library provides four approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
 
-#### 1. Precise BC (`-preciseBC`) - **HIGHEST FIDELITY**
+#### 1. Pressure-Coupled BC
+
+Uses `spaceTimeWindowCoupledPressure` BC for pressure and `spaceTimeWindow` for velocity. This is the **recommended approach** because it properly handles the elliptic nature of the pressure equation.
+
+**Why pressure coupling is essential:**
+
+Unlike velocity (which is advected and hyperbolic), pressure is governed by an **elliptic equation**. Cutting the domain artificially severs the pressure influence from outside the extraction window. Simply prescribing Dirichlet (extracted pressure values) or Neumann (zero gradient) conditions can lead to:
+- Pressure drift over time
+- Incorrect pressure gradients at the boundary
+- Mass conservation issues
+- Different flow behavior than the source simulation
+
+The `spaceTimeWindowCoupledPressure` BC solves this by **blending Dirichlet and Neumann conditions** based on local flux. Two blending modes are available:
+
+**fluxMagnitude mode (default, recommended):**
+- **At stagnant faces (zero flux)**: Uses Dirichlet (safe to prescribe pressure)
+- **At active flow faces**: Uses Neumann (gradient for continuity compatibility)
+
+**flowDirection mode (original):**
+- **At inflow faces**: More weight towards Dirichlet (pressure enters from outside)
+- **At outflow faces**: More weight towards Neumann (pressure from interior dominates)
+
+**Extraction configuration:**
+```cpp
+extractSubset
+{
+    type            spaceTimeWindowExtract;
+    libs            (spaceTimeWindow);
+    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
+    outputDir       "../subset";
+
+    fields          (U p);          // Time-varying BC data (U and p for boundaries)
+    initialFields   (U p nut);      // Initial conditions (nut needed for turbulence model)
+
+    // Enable gradient extraction for pressure coupling
+    extractGradients    true;
+    gradientFields      (p);        // Extract normal gradient of pressure (creates gradp)
+
+    writeFormat     deltaVarint;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+```
+
+**Reconstruction boundary conditions:**
+```cpp
+// In 0/p
+oldInternalFaces
+{
+    type            spaceTimeWindowCoupledPressure;
+    dataDir         "constant/boundaryData";
+    phi             phi;
+    blendingMode    fluxMagnitude;  // or flowDirection (default: fluxMagnitude)
+    dirichletWeight 0.8;    // Weight at zero-flux faces (fluxMagnitude) or inflow (flowDirection)
+    neumannWeight   0.8;    // Weight at active-flow faces (fluxMagnitude) or outflow (flowDirection)
+    transitionWidth 0.1;    // Smooth transition width
+    timeInterpolationScheme cubic;
+    value           uniform 0;
+}
+
+// In 0/U
+oldInternalFaces
+{
+    type            spaceTimeWindow;
+    dataDir         "constant/boundaryData";
+    timeInterpolationScheme cubic;
+    value           uniform (0 0 0);
+}
+```
+
+#### 2. Precise BC (`-preciseBC`) - 
 
 Uses the intermediate velocity **u\*** = H(U)/A (called `HbyA` in OpenFOAM) instead of the final velocity U as the boundary condition. Based on Wu, Zaki, Meneveau (Phys. Rev. Fluids 5, 064607, 2020), this is the theoretically optimal BC for subdomain pressure recovery.
 
@@ -32,7 +102,10 @@ Uses the intermediate velocity **u\*** = H(U)/A (called `HbyA` in OpenFOAM) inst
 - Prescribing u\* exactly on the boundary makes the subdomain pressure equation identical to the full-domain one
 - Face values use OpenFOAM's exact distance-weighted interpolation formula — no interpolation error
 - Wu et al. (2020) demonstrated machine-precision accuracy in DNS, where the very high resolution minimizes the discretization stencil mismatch at boundary cells (Jasak 1996; Ferziger & Peric 2020), and spectral/direct (non-iterative) pressure solvers yield exact solutions
-- On practical LES/RANS meshes with iterative solvers (e.g. GAMG), the coarser grid amplifies this mismatch, though it remains negligible compared to the inherent modelling error of turbulence closures. `-preciseBC` remains the most accurate option (~20% lower pressure errors than standard coupled pressure, see Accuracy Comparison below)
+- On practical LES/RANS meshes with iterative solvers (e.g. GAMG), the coarser grid amplifies this mismatch, though it remains negligible compared to the inherent modelling error of turbulence closures. `-preciseBC` remains the most accurate option (~20% lower pressure errors than standard coupled pressure, see Accuracy Comparison below), but it requires patched solver
+
+**Notice:**
+- Please see the CFD Validation Philosophy section
 
 **Requirements:**
 - Extraction must use `pimpleFoamPrecise` (registers HbyA in objectRegistry)
@@ -127,76 +200,6 @@ Error decay with distance from the oldInternalFaces boundary (`-preciseBC`):
 | 0.10–0.20 | 14,076 | 1.2e-5 | 9.2e-5 | 5.3e-5 | 5.5e-4 |
 
 In this comparison, no temporal interpolation is used (boundary data at every solver timestep) and face values use OpenFOAM's exact distance-weighted interpolation formula. Despite this, a reconstruction error remains. It arises from the non-linear discretization difference between full-domain internal faces and subdomain Dirichlet boundary faces (Jasak 1996; Moukalled et al. 2016): convective flux limiters (TVD/upwind), the multigrid pressure solver (GAMG), and gradient reconstruction all behave differently at boundary faces (Ferziger & Peric 2020), introducing small differences that compound over timesteps. Wu et al. (2020) report machine-precision accuracy in DNS, where the very high spatial resolution minimizes this stencil mismatch and spectral/direct (non-iterative) pressure solvers yield exact solutions. Note that LES and RANS are inherently approximate---turbulence closure models introduce modelling errors that dwarf the reconstruction error.
-
-#### 2. Pressure-Coupled BC
-
-Uses `spaceTimeWindowCoupledPressure` BC for pressure and `spaceTimeWindow` for velocity. This is the **recommended approach** because it properly handles the elliptic nature of the pressure equation.
-
-**Why pressure coupling is essential:**
-
-Unlike velocity (which is advected and hyperbolic), pressure is governed by an **elliptic equation**. Cutting the domain artificially severs the pressure influence from outside the extraction window. Simply prescribing Dirichlet (extracted pressure values) or Neumann (zero gradient) conditions can lead to:
-- Pressure drift over time
-- Incorrect pressure gradients at the boundary
-- Mass conservation issues
-- Different flow behavior than the source simulation
-
-The `spaceTimeWindowCoupledPressure` BC solves this by **blending Dirichlet and Neumann conditions** based on local flux. Two blending modes are available:
-
-**fluxMagnitude mode (default, recommended):**
-- **At stagnant faces (zero flux)**: Uses Dirichlet (safe to prescribe pressure)
-- **At active flow faces**: Uses Neumann (gradient for continuity compatibility)
-
-**flowDirection mode (original):**
-- **At inflow faces**: More weight towards Dirichlet (pressure enters from outside)
-- **At outflow faces**: More weight towards Neumann (pressure from interior dominates)
-
-**Extraction configuration:**
-```cpp
-extractSubset
-{
-    type            spaceTimeWindowExtract;
-    libs            (spaceTimeWindow);
-    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
-    outputDir       "../subset";
-
-    fields          (U p);          // Time-varying BC data (U and p for boundaries)
-    initialFields   (U p nut);      // Initial conditions (nut needed for turbulence model)
-
-    // Enable gradient extraction for pressure coupling
-    extractGradients    true;
-    gradientFields      (p);        // Extract normal gradient of pressure (creates gradp)
-
-    writeFormat     deltaVarint;
-    writeControl    timeStep;
-    writeInterval   1;
-}
-```
-
-**Reconstruction boundary conditions:**
-```cpp
-// In 0/p
-oldInternalFaces
-{
-    type            spaceTimeWindowCoupledPressure;
-    dataDir         "constant/boundaryData";
-    phi             phi;
-    blendingMode    fluxMagnitude;  // or flowDirection (default: fluxMagnitude)
-    dirichletWeight 0.8;    // Weight at zero-flux faces (fluxMagnitude) or inflow (flowDirection)
-    neumannWeight   0.8;    // Weight at active-flow faces (fluxMagnitude) or outflow (flowDirection)
-    transitionWidth 0.1;    // Smooth transition width
-    timeInterpolationScheme cubic;
-    value           uniform 0;
-}
-
-// In 0/U
-oldInternalFaces
-{
-    type            spaceTimeWindow;
-    dataDir         "constant/boundaryData";
-    timeInterpolationScheme cubic;
-    value           uniform (0 0 0);
-}
-```
 
 #### 3. Inlet-Outlet BC (`-inletOutletBC`) - For Quick Tests
 

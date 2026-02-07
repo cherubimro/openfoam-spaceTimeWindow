@@ -1,5 +1,9 @@
 # spaceTimeWindow Library
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18516872.svg)](https://doi.org/10.5281/zenodo.18516872)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![OpenFOAM](https://img.shields.io/badge/OpenFOAM-v2512-orange.svg)](https://www.openfoam.com/)
+
 **Read [doc/tutorial](./doc/tutorial.pdf) for details**.
 
 A library for space-time window extraction and reconstruction of LES simulations, developed for OpenFOAM.

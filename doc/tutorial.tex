@@ -190,8 +190,9 @@
     drop shadow=black!15,
 }
 
+%\usepackage{bookmark}
 % Hyperlinks (colorful and modern)
-\usepackage{hyperref}
+\usepackage[bookmarks=true]{hyperref}
 \hypersetup{
     colorlinks=true,
     linkcolor=primarydark,
@@ -201,10 +202,13 @@
     pdfauthor={Alin-Adrian Anton},
     pdfsubject={OpenFOAM Space-Time Window Reconstruction},
     pdfkeywords={CFD, OpenFOAM, LES, spaceTimeWindow, boundary conditions},
-    pdfpagemode=UseOutlines,     % Open with bookmarks panel visible
-    bookmarksopen=true,           % Expand bookmarks by default
-    bookmarksnumbered=true,       % Show section numbers in bookmarks
+    pdfpagemode=UseOutlines,
+    bookmarksopen=true,
+    bookmarksopenlevel=2,        % Expand to level 2 (sections)
+    bookmarksdepth=3,            % Include subsections in bookmarks
+    pdfstartview=FitH,           % Fit width on open
 }
+\usepackage{bookmark}
 
 % Bibliography - use natbib for wider compatibility (bibtex)
 % If biber is available, uncomment the biblatex lines instead
@@ -1090,7 +1094,7 @@ Even with exact boundary data and identical solver settings, the subdomain solut
     \item \textbf{Multigrid pressure solvers} (e.g.\ GAMG) agglomerate cells into coarser levels; the coarsening pattern and the coarse-level matrix structure differ near Dirichlet boundaries compared to the interior~\cite{Ferziger2020}.
     \item \textbf{Gradient reconstruction} (e.g.\ Gauss or least-squares) at boundary-adjacent cells uses the prescribed face value instead of a neighbour cell value, changing the gradient estimate~\cite{Moukalled2016}.
 \end{itemize}
-These effects are localised: errors are largest in cells adjacent to the extraction boundary and decay rapidly with distance (see \cref{sec:accuracy-comparison}).
+These effects are localised: errors are largest in cells adjacent to the extraction boundary and decay rapidly with distance (see \cref{sec:accuracy-comparison}). The \texttt{-ghostCells} option (\cref{sec:ghost-cells}) eliminates this stencil mismatch entirely by keeping the original extraction boundary faces as internal faces, pushing the mismatch to an outer ghost layer where values are overwritten from extracted data.
 \end{notebox}
 
 With time interpolation enabled (recommended for practical use), the reconstruction closely approximates the original solution, with additional errors controlled by the interpolation scheme (linear or cubic Catmull-Rom spline).
@@ -1637,7 +1641,7 @@ For critical simulations, archive the encrypted reconstruction case to WORM stor
 \section{Boundary Condition Approaches}
 \label{sec:bc-approaches}
 
-The library provides four approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}):
+The library provides five approaches for applying boundary conditions on the extraction boundary (\texttt{oldInternalFaces}), plus an optional ghost cell mode that can be combined with any approach:
 
 \subsection{Pressure-Coupled BC --- Recommended}
 \label{sec:pressure-coupled-bc}
@@ -1871,6 +1875,182 @@ spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 The options \texttt{-preciseBC}, \texttt{-inletOutletBC}, and \texttt{-outletDirection} are mutually exclusive. Using incompatible combinations produces an error with guidance.
 \end{warningbox}
 
+\subsection{Ghost Cell Mode (\texttt{-ghostCells}) --- Machine-Precision Reconstruction}
+\label{sec:ghost-cells}
+
+The \texttt{-ghostCells} option includes one extra layer of cells (``ghost cells'') outside the extraction boundary in the sub-mesh. Ghost cell values are prescribed from the extracted global simulation data at each timestep using either an \texttt{fvOption} or explicit solver-side overwrite. This pushes the boundary stencil mismatch (see \cref{sec:concept-why}) one layer outward, where it only affects ghost cells that are overwritten anyway. The original extraction boundary faces remain \textbf{internal} in the sub-mesh, preserving the identical FVM stencil as the global simulation.
+
+\textbf{Why ghost cells achieve machine-precision accuracy:}
+\begin{itemize}
+    \item Without ghost cells, extracting a subdomain converts internal faces to boundary faces, changing the FVM discretization stencil---TVD limiters, GAMG coarsening, and gradient reconstruction all behave differently at boundary faces. This limits accuracy to $\sim O(10^{-3})$.
+    \item With ghost cells, the original extraction boundary faces stay internal. The stencil mismatch is pushed to the outer ghost boundary, affecting only ghost cells which are overwritten from extracted data.
+    \item All ghost cell data uses direct cell-centre values (no interpolation), preserving machine-precision transfer at every stage of the pipeline.
+\end{itemize}
+
+\Cref{fig:ghost-cell-strategy} illustrates the ghost cell strategy.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=0.82,
+    every node/.style={font=\sffamily\small},
+    cellnode/.style={minimum width=1.6cm, minimum height=1.4cm, draw=gray!60, line width=0.5pt, inner sep=0pt},
+]
+    % ===== PANEL A: WITHOUT GHOST CELLS =====
+    \node[font=\sffamily\bfseries\small, primarydark, anchor=west] at (-5.4,1.8) {(a) Without ghost cells};
+
+    % Subdomain cells
+    \node[cellnode, fill=primarylight!40] (a1) at (-3.6,0) {};
+    \node[cellnode, fill=primarylight!40] (a2) at (-2.0,0) {};
+    \node[cellnode, fill=primarylight!40] (a3) at (-0.4,0) {};
+
+    % Cell center dots
+    \foreach \x in {-3.6,-2.0,-0.4} {
+        \filldraw[primaryblue] (\x,0) circle (2.5pt);
+    }
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-3.6,-0.45) {$\phi_i$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-2.0,-0.45) {$\phi_j$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-0.4,-0.45) {$\phi_k$};
+
+    % Extraction boundary = boundary face
+    \draw[warningorange, line width=3pt] (0.4,-0.7) -- (0.4,0.7);
+
+    % Excluded domain
+    \node[cellnode, fill=gray!15, draw=gray!30] (ex1) at (1.6,0) {};
+    \node[cellnode, fill=gray!15, draw=gray!30] (ex2) at (3.2,0) {};
+    \filldraw[gray!40] (1.6,0) circle (2pt);
+    \filldraw[gray!40] (3.2,0) circle (2pt);
+    \node[gray!50, font=\sffamily\tiny] at (2.4,-1.0) {Excluded};
+
+    % Boundary face label
+    \node[warningorange, font=\sffamily\footnotesize, anchor=south, text width=2.2cm, align=center] at (0.4,0.85) {Patch\\boundary};
+
+    % Problem annotation: cell k stencil changed
+    \draw[red!70, line width=1.2pt, dashed, rounded corners=2pt] (-1.15,-0.62) rectangle (0.35,0.62);
+
+    % Arrow pointing to the problem
+    \draw[->, red!70, line width=1pt] (1.7,1.5) -- (0.1,0.7);
+    \node[red!70, font=\sffamily\footnotesize, anchor=west, text width=3.8cm] at (1.8,1.7) {Cell $k$: stencil changed\\(boundary face, not internal)};
+
+    % Subdomain label
+    \node[primarydark, font=\sffamily\footnotesize] at (-2.0,-1.0) {Subdomain};
+
+    % ===== PANEL B: WITH GHOST CELLS =====
+    \node[font=\sffamily\bfseries\small, primarydark, anchor=west] at (-5.4,-2.3) {(b) With ghost cells};
+
+    % Subdomain cells
+    \node[cellnode, fill=primarylight!40] (b1) at (-3.6,-4.1) {};
+    \node[cellnode, fill=primarylight!40] (b2) at (-2.0,-4.1) {};
+    \node[cellnode, fill=primarylight!40] (b3) at (-0.4,-4.1) {};
+
+    % Ghost cell
+    \node[cellnode, fill=warninglight, draw=warningorange!60] (g1) at (1.2,-4.1) {};
+    \node[warningorange, font=\sffamily\footnotesize\bfseries] at (1.2,-4.1) {Ghost};
+
+    % Cell center dots
+    \foreach \x in {-3.6,-2.0,-0.4} {
+        \filldraw[primaryblue] (\x,-4.1) circle (2.5pt);
+    }
+    \filldraw[warningorange] (1.2,-4.1) circle (2.5pt);
+
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-3.6,-4.55) {$\phi_i$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-2.0,-4.55) {$\phi_j$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=north] at (-0.4,-4.55) {$\phi_k$};
+
+    % Original extraction boundary = INTERNAL face
+    \draw[secondarygreen, line width=2.5pt] (0.4,-4.8) -- (0.4,-3.4);
+    \node[secondarygreen, font=\sffamily\footnotesize, anchor=south, text width=2.2cm, align=center] at (0.4,-3.2) {Internal\\face~$\checkmark$};
+
+    % Outer boundary
+    \draw[gray!50, line width=2pt] (2.0,-4.8) -- (2.0,-3.4);
+    \node[gray!50, font=\sffamily\footnotesize, anchor=south] at (2.0,-3.2) {\texttt{zeroGrad}};
+
+    % Excluded domain
+    \node[cellnode, fill=gray!15, draw=gray!30, minimum width=1.4cm] (ex3) at (3.0,-4.1) {};
+    \filldraw[gray!40] (3.0,-4.1) circle (2pt);
+    \node[gray!50, font=\sffamily\tiny] at (3.0,-5.1) {Excluded};
+
+    % Arrow showing ghost cell overwrite
+    \draw[->, warningorange, line width=1.2pt] (1.2,-2.5) -- (1.2,-3.3);
+    \node[warningorange, font=\sffamily\footnotesize, anchor=south, text width=2.8cm, align=center] at (1.2,-2.5) {Overwritten from\\extracted data};
+
+    % Happy annotation: cell k stencil preserved
+    \draw[secondarygreen, line width=1.2pt, dashed, rounded corners=2pt] (-1.15,-4.72) rectangle (0.35,-3.48);
+    \draw[->, secondarygreen, line width=1pt] (-2.3,-2.7) -- (-0.6,-3.4);
+    \node[secondarygreen, font=\sffamily\footnotesize, anchor=east, text width=3.6cm, align=right] at (-2.4,-2.5) {Cell $k$: stencil preserved\\(internal face with neighbor)};
+
+    % Subdomain label
+    \node[primarydark, font=\sffamily\footnotesize] at (-2.0,-5.1) {Subdomain};
+
+\end{tikzpicture}
+\caption{Ghost cell strategy. (a)~Without ghost cells, the extraction boundary becomes a patch boundary face, altering the FVM discretization stencil for adjacent cells (different limiters, gradient reconstruction, and GAMG coarsening behaviour). (b)~With one layer of ghost cells, the original extraction boundary remains an internal face with the identical stencil as in the global simulation. Ghost cell values are overwritten from extracted data at each timestep; the outer boundary uses \texttt{zeroGradient} (its effect is confined to ghost cells that are overwritten anyway).}
+\label{fig:ghost-cell-strategy}
+\end{figure}
+
+\textbf{Two ghost cell forcing mechanisms are provided:}
+
+\begin{enumerate}
+    \item \textbf{ghostCellConstraint fvOption} (recommended): Overrides the matrix equation in ghost cells via \texttt{eqn.setValues()}. Works with any solver that supports \texttt{fvOptions.constrain()}.
+    \item \textbf{Explicit overwrite} (built into \texttt{pimpleFoamStag} and \texttt{pimpleFoamPrecise}): Directly writes ghost cell values into the field arrays. Activated automatically when a \texttt{ghostCells} cellZone exists in the mesh.
+\end{enumerate}
+
+\begin{lstlisting}[language=OpenFOAM,caption={Extraction configuration with ghost cells}]
+extractSubset
+{
+    type            spaceTimeWindowExtract;
+    libs            (spaceTimeWindow);
+    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
+    outputDir       "../subset";
+
+    fields          (U p);
+    initialFields   (U p nut);
+
+    extractGhostCells   true;       // Enable ghost cell data extraction
+
+    writeFormat     deltaVarint;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash,caption={Ghost cell reconstruction workflow}]
+# Case initialization with ghost cells
+spaceTimeWindowInitCase -sourceCase ../source-case -ghostCells
+
+# Run reconstruction (ghost cell overwrite is automatic)
+pimpleFoamStag    # or pimpleFoamPrecise
+\end{lstlisting}
+
+\begin{lstlisting}[language=OpenFOAM,caption={ghostCellConstraint fvOption configuration}]
+// In constant/fvOptions or system/fvSolution
+ghostU
+{
+    type            vectorGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (U);
+}
+
+ghostP
+{
+    type            scalarGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (p);
+}
+\end{lstlisting}
+
+\begin{notebox}
+When \texttt{-ghostCells} is used, the \texttt{oldInternalFaces} patch moves one layer outward (to the ghost cell outer boundary). All fields on this patch receive \texttt{zeroGradient} BCs by default, since the ghost cells are overwritten from extracted data and the outer boundary condition does not affect the interior solution.
+\end{notebox}
+
+\begin{notebox}
+Ghost cell mode can be combined with any BC approach. For example, \texttt{-ghostCells} with \texttt{-preciseBC} uses ghost cell forcing for the interior stencil and u$^*$ data on the (now-internal) original extraction boundary.
+\end{notebox}
+
 \subsection{Boundary Condition Assignment Logic}
 
 For each field in the initial time directory, \texttt{spaceTimeWindowInitCase} assigns BCs according to \Cref{tab:bc-assignment}.
@@ -2066,6 +2246,9 @@ functions
         // Gzip compression (ignored for deltaVarint/dvzt)
         writeCompression off;
 
+        // Ghost cell extraction (for machine-precision reconstruction)
+        // extractGhostCells true;
+
         // Optional encryption
         // publicKey     "base64-encoded-public-key";
 
@@ -2093,6 +2276,7 @@ functions
 \texttt{initialFields} & wordList & No & Fields for initial conditions (default: same as fields) \\
 \texttt{extractGradients} & bool & No & Enable gradient extraction (default: false) \\
 \texttt{gradientFields} & wordList & No & Fields for gradient extraction (requires extractGradients) \\
+\texttt{extractGhostCells} & bool & No & Extract ghost cell data for machine-precision reconstruction (default: false) \\
 \texttt{writeFormat} & word & No & \texttt{ascii}, \texttt{binary}, \texttt{deltaVarint}, or \texttt{dvzt} \\
 \texttt{deltaVarintPrecision} & label & No & Decimal digits (default: 6) \\
 \texttt{dvztKeyframeInterval} & label & No & Keyframe interval for dvzt (default: 20) \\
@@ -2336,6 +2520,9 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 # Alternative: fixed outlet direction for steady-mean flows
 spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 
+# Ghost cell mode: machine-precision reconstruction
+spaceTimeWindowInitCase -sourceCase ../source-case -ghostCells
+
 # With mass flux correction (optional, ensures exact mass conservation)
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFlux
 \end{lstlisting}
@@ -2354,6 +2541,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 \texttt{-inletOutletBC} & flag & Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) \\
 \texttt{-outletDirection} & vector & Create fixed outlet patch in given direction (e.g., ``(1 0 0)'') \\
 \texttt{-outletFraction} & scalar & Fraction of box extent for outlet region (default: 0.1) \\
+\texttt{-ghostCells} & flag & Include one layer of ghost cells outside extraction boundary for machine-precision reconstruction (see \cref{sec:ghost-cells}) \\
 \texttt{-correctMassFlux} & flag & Apply least-squares mass flux correction to boundaryData \\
 \texttt{-initialFields} & list & Override initial fields list (e.g., ``(U p nut k)'') \\
 \texttt{-refineLevel} & label & Refine mesh N times (spatial interpolation at runtime) \\
@@ -2817,6 +3005,14 @@ outputDir/
                     U               # or U.dvz, U.dvz.zstd, U.dvz.zstd.enc
                     p               # pressure (for coupled BC)
                     gradp           # pressure gradient (for coupled BC)
+                0.0002/
+                    ...
+            ghostCells/             # Only when extractGhostCells is true
+                cellCentres         # Ghost cell positions (written once)
+                ghostCellMap        # Data index to subset cell index mapping
+                0.0001/
+                    U               # Cell-centre values per timestep
+                    p
                 0.0002/
                     ...
     0.0001/                     # Initial fields (serial only)
@@ -3449,6 +3645,8 @@ The \texttt{extractionMetadata} file contains:
     boxMin              (0.05 -0.25 0.01);
     boxMax              (0.90 0.25 0.38);
     nGlobalFaces        12345;
+    extractGhostCells   true;       // present when ghost cells enabled
+    nGhostCells         432;        // number of ghost cells
     timesteps           (0.0001 0.0002 0.0003 ...);
 }
 \end{lstlisting}
@@ -3651,8 +3849,14 @@ The recommended mass conservation strategies are summarized in \cref{tab:mass-st
 \toprule
 \textbf{Configuration} & \textbf{Description} \\
 \midrule
+\texttt{-ghostCells} &
+\textbf{Machine-precision}. Eliminates boundary stencil mismatch by including ghost cells. Requires \texttt{pimpleFoamStag} or \texttt{pimpleFoamPrecise}. \\
+\addlinespace
 \texttt{-preciseBC} &
 \textbf{Highest fidelity}. Most accurate pressure recovery using HbyA ($\mathbf{u}^*$). Requires \texttt{pimpleFoamPrecise} extraction. \\
+\addlinespace
+\texttt{-ghostCells} + \texttt{-preciseBC} &
+\textbf{Maximum fidelity}. Ghost cells + $\mathbf{u}^*$ boundary data. \\
 \addlinespace
 \texttt{-inletOutletBC} &
 Recommended for quick tests. Natural mass balance through flux-based switching. \\
@@ -4554,6 +4758,272 @@ The reconstruction phase uses standard \texttt{pimpleFoam} --- no special solver
 
 \begin{notebox}
 \texttt{pimpleFoamPrecise} adds negligible overhead compared to standard \texttt{pimpleFoam}. The only additional cost is a single field copy (\texttt{HbyA\_stored = HbyA}) per pressure correction iteration.
+\end{notebox}
+
+% ----------------------------------------------------------------------------
+% PIMPLEFOAMSTAG SOLVER
+% ----------------------------------------------------------------------------
+
+\section{The \texttt{pimpleFoamStag} Solver}
+\label{sec:pimpleFoamStag}
+
+The \texttt{pimpleFoamStag} solver implements a Mahesh-style~\cite{Mahesh2004} hybrid staggered mesh approach for incompressible, turbulent flow. Face-normal velocity \texttt{Un} is the primary kinematic variable, eliminating Rhie-Chow interpolation~\cite{Rhie1983} and providing exact discrete mass conservation.
+
+\subsection{Algorithm}
+
+The algorithm per PIMPLE iteration is:
+
+\begin{enumerate}
+    \item \textbf{Reconstruct}: Cell-centred $\mathbf{U}$ from face-normal $U_n$ via least-squares
+    \item \textbf{Momentum}: Cell-centred UEqn using standard \texttt{fvm}/\texttt{fvc} operators
+    \item \textbf{Project}: HbyA to face-normal $U_n^*$
+    \item \textbf{Pressure}: $\nabla \cdot (r_{AU_f} \nabla p) = \nabla \cdot \phi^*$
+    \item \textbf{Correct}: $U_n = U_n^* - r_{AU_f} \, \partial p / \partial n$ (exact, no Rhie-Chow)
+    \item \textbf{Turbulence}: \texttt{turbulence->correct()} on final iteration
+\end{enumerate}
+
+\subsection{Colocated vs Staggered Discretization}
+\label{sec:colocated-vs-staggered}
+
+The fundamental difference between \texttt{pimpleFoamPrecise} (and standard \texttt{pimpleFoam}) and \texttt{pimpleFoamStag} lies in where the velocity unknowns are stored, as illustrated in \cref{fig:colocated-vs-staggered}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    >=Stealth,
+    scale=1.0,
+    every node/.style={font=\sffamily\small},
+]
+    % ===== LEFT: COLOCATED ARRANGEMENT =====
+    \node[font=\sffamily\bfseries\small, primarydark] at (2.25,5.0) {(a) Colocated};
+    \node[font=\sffamily\footnotesize, bodytext] at (2.25,4.6) {(\texttt{pimpleFoam}, \texttt{pimpleFoamPrecise})};
+
+    % Grid lines
+    \draw[gray!40, line width=0.5pt] (0,0) grid[step=1.5] (4.5,4.5);
+    \draw[gray!70, line width=1pt] (0,0) rectangle (4.5,4.5);
+
+    % Cell center dots (U, p) - show labels only in center row for clarity
+    \foreach \i in {0.75,2.25,3.75} {
+        \foreach \j in {0.75,2.25,3.75} {
+            \filldraw[primaryblue] (\i,\j) circle (3pt);
+        }
+    }
+    % Labels for center column
+    \node[primaryblue, font=\sffamily\tiny, anchor=south east] at (0.65,0.85) {$\mathbf{U},p$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=south east] at (0.65,2.35) {$\mathbf{U},p$};
+    \node[primaryblue, font=\sffamily\tiny, anchor=south east] at (0.65,3.85) {$\mathbf{U},p$};
+
+    % Rhie-Chow interpolation illustration (between two cells)
+    \draw[->, red!60, line width=1.3pt, shorten >=3pt] (0.75,2.25) -- (1.5,2.25);
+    \draw[->, red!60, line width=1.3pt, shorten >=3pt] (2.25,2.25) -- (1.5,2.25);
+    \filldraw[warningorange] (1.5,2.25) circle (2.5pt);
+
+    % Rhie-Chow label with brace
+    \draw[decorate, decoration={brace, amplitude=4pt, mirror}, warningorange, line width=0.8pt]
+        (0.85,1.85) -- (2.15,1.85);
+    \node[warningorange, font=\sffamily\tiny, anchor=north, text width=2.2cm, align=center] at (1.5,1.7) {Rhie-Chow\\interpolation};
+
+    % Checkerboard risk annotation
+    \node[red!60, font=\sffamily\tiny, anchor=north west, text width=2.5cm] at (3.0,1.2) {Risk: pressure\\checkerboard};
+
+    % Legend
+    \filldraw[primaryblue] (0.0,-0.6) circle (3pt);
+    \node[anchor=west, font=\sffamily\footnotesize] at (0.2,-0.6) {$\mathbf{U}, p$ at cell centre};
+    \filldraw[warningorange] (0.0,-1.1) circle (2.5pt);
+    \node[anchor=west, font=\sffamily\footnotesize] at (0.2,-1.1) {Face flux (interpolated)};
+
+    % ===== RIGHT: STAGGERED ARRANGEMENT =====
+    \node[font=\sffamily\bfseries\small, primarydark] at (8.75,5.0) {(b) Hybrid staggered~\cite{Mahesh2004}};
+    \node[font=\sffamily\footnotesize, bodytext] at (8.75,4.6) {(\texttt{pimpleFoamStag})};
+
+    % Grid lines
+    \draw[gray!40, line width=0.5pt] (6.5,0) grid[step=1.5] (11.0,4.5);
+    \draw[gray!70, line width=1pt] (6.5,0) rectangle (11.0,4.5);
+
+    % Cell center pressure (p only)
+    \foreach \i in {7.25,8.75,10.25} {
+        \foreach \j in {0.75,2.25,3.75} {
+            \filldraw[accentpurple] (\i,\j) circle (3pt);
+        }
+    }
+    % Labels for first column
+    \node[accentpurple, font=\sffamily\tiny, anchor=south east] at (7.15,0.85) {$p$};
+    \node[accentpurple, font=\sffamily\tiny, anchor=south east] at (7.15,2.35) {$p$};
+    \node[accentpurple, font=\sffamily\tiny, anchor=south east] at (7.15,3.85) {$p$};
+
+    % Face-normal velocity Un at vertical faces (small horizontal arrows)
+    \foreach \x in {8.0,9.5} {
+        \foreach \j in {0.75,2.25,3.75} {
+            \draw[->, secondarygreen, line width=1.6pt] ({\x-0.22},\j) -- ({\x+0.22},\j);
+        }
+    }
+
+    % Face-normal velocity Un at horizontal faces (small vertical arrows)
+    \foreach \i in {7.25,8.75,10.25} {
+        \foreach \y in {1.5,3.0} {
+            \draw[->, secondarygreen, line width=1.6pt] (\i,{\y-0.22}) -- (\i,{\y+0.22});
+        }
+    }
+
+    % Direct flux annotation
+    \node[secondarygreen, font=\sffamily\tiny, anchor=west, text width=1.8cm] at (9.7,1.5) {$U_n$: exact\\face flux};
+
+    % Reconstruction annotation (Un -> U)
+    \draw[->, gray, line width=0.8pt, dashed] (8.0,3.75) -- (8.75,3.75);
+    \node[gray, font=\sffamily\tiny, anchor=south] at (8.4,3.9) {reconstruct $\mathbf{U}$};
+
+    % Legend
+    \filldraw[accentpurple] (6.5,-0.6) circle (3pt);
+    \node[anchor=west, font=\sffamily\footnotesize] at (6.7,-0.6) {$p$ at cell centre};
+    \draw[->, secondarygreen, line width=1.6pt] (6.5,-1.1) -- (6.94,-1.1);
+    \node[anchor=west, font=\sffamily\footnotesize] at (7.0,-1.1) {$U_n$ at face centre (primary)};
+
+\end{tikzpicture}
+\caption{Comparison of variable arrangements in the finite volume method. (a)~Colocated: all variables ($\mathbf{U}$, $p$) stored at cell centres; face velocities for flux computation require Rhie-Chow interpolation to suppress pressure--velocity decoupling (checkerboard oscillations). (b)~Hybrid staggered~\cite{Mahesh2004}: face-normal velocity $U_n$ is the primary kinematic variable stored directly at face centres; pressure $p$ at cell centres. Face flux is computed exactly from $U_n$ without interpolation, inherently preventing checkerboard modes. Cell-centred $\mathbf{U}$ is reconstructed from $U_n$ via least-squares each iteration.}
+\label{fig:colocated-vs-staggered}
+\end{figure}
+
+\textbf{Colocated (standard FVM):} In the colocated arrangement used by \texttt{pimpleFoam} and \texttt{pimpleFoamPrecise}, all field variables ($\mathbf{U}$, $p$) are stored at cell centres. When computing the face flux for the continuity equation, cell-centred velocities must be interpolated to face centres. Naive linear interpolation leads to \emph{pressure--velocity decoupling}: the pressure field can develop a checkerboard pattern (alternating high/low values) that satisfies the discrete equations but is physically meaningless. The Rhie-Chow interpolation~\cite{Rhie1983} adds a pressure-dependent correction to the face velocity:
+\[
+    \mathbf{U}_f = \overline{\mathbf{U}}_f - \overline{\left(\frac{1}{A}\right)}_f
+    \left[ (\nabla p)_f - \overline{(\nabla p)}_f \right]
+\]
+where overbars denote linear interpolation and $(\nabla p)_f$ is the face-normal gradient computed from the cell values on each side. This suppresses checkerboard modes but introduces an artificial dissipation term that depends on the mesh and timestep.
+
+\textbf{Hybrid staggered~\cite{Mahesh2004}:} In \texttt{pimpleFoamStag}, the face-normal velocity $U_n = \mathbf{U} \cdot \hat{\mathbf{n}}$ is stored directly at face centres as the \emph{primary} kinematic variable. The face flux is then exactly $\phi_f = U_n \, |S_f|$---no interpolation, no Rhie-Chow correction. The pressure--velocity coupling is inherently stable because pressure and velocity unknowns live at staggered locations. The cell-centred velocity $\mathbf{U}$ (needed for the momentum equation, turbulence model, and post-processing) is reconstructed from $U_n$ each iteration via a least-squares procedure:
+\[
+    \mathbf{U}_P = \mathsf{T}_P^{-1} \sum_f U_{n,f} \, \mathbf{S}_f, \qquad
+    \mathsf{T}_P = \sum_f \hat{\mathbf{n}}_f \otimes \mathbf{S}_f
+\]
+
+The pressure correction step is exact at the discrete level:
+\[
+    U_n = U_n^* - \left(\frac{1}{A}\right)_f \frac{\partial p}{\partial n}\bigg|_f
+\]
+where $U_n^*$ is the predicted face-normal velocity from the momentum equation projection and $\partial p / \partial n|_f$ is computed directly from adjacent cell pressures.
+
+\subsection{Comparison of \texttt{pimpleFoamPrecise} and \texttt{pimpleFoamStag}}
+\label{sec:solver-comparison}
+
+\Cref{tab:solver-comparison} summarises the key differences between the two solvers.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of \texttt{pimpleFoamPrecise} and \texttt{pimpleFoamStag}}
+\label{tab:solver-comparison}
+\small
+\begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Property} & \textbf{pimpleFoamPrecise} & \textbf{pimpleFoamStag} \\
+\midrule
+\tableheaderrow
+Base algorithm & Standard PIMPLE (colocated) & PIMPLE with hybrid staggered grid \\
+Primary velocity variable & Cell-centred $\mathbf{U}$ & Face-normal $U_n$ \\
+\tablealternaterow
+Pressure--velocity coupling & Rhie-Chow interpolation & Inherent (staggered grid) \\
+Face flux computation & Interpolated from cell $\mathbf{U}$ & Exact: $\phi_f = U_n |S_f|$ \\
+\tablealternaterow
+Velocity correction & $\mathbf{U} = \mathbf{u}^* - (1/A)\,\nabla p$ & $U_n = U_n^* - (1/A)_f\,\partial p/\partial n$ \\
+Reconstruction step & None & Least-squares $U_n \to \mathbf{U}$ each iteration \\
+\tablealternaterow
+Checkerboard risk & Suppressed by Rhie-Chow & Eliminated \\
+Discrete mass conservation & Approximate (Rhie-Chow) & Exact \\
+\tablealternaterow
+HbyA registration & Yes (persistent field) & Yes (persistent field) \\
+Ghost cell support & Yes (explicit overwrite) & Yes (explicit overwrite) \\
+\tablealternaterow
+Computational overhead & Negligible vs standard \texttt{pimpleFoam} & Small: one reconstruction per iteration \\
+\midrule
+\multicolumn{3}{@{}l}{\textbf{When to use}} \\
+\midrule
+Extraction phase & Recommended for \texttt{-preciseBC} & When staggered accuracy is needed \\
+\tablealternaterow
+Reconstruction phase & Use standard \texttt{pimpleFoam} & Use when exact mass conservation is critical \\
+Ghost cell mode & Full support & Full support \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{tipbox}
+For most users, \texttt{pimpleFoamPrecise} is the recommended choice for the extraction phase (it enables \texttt{-preciseBC} with minimal overhead). The reconstruction phase can use standard \texttt{pimpleFoam}. Use \texttt{pimpleFoamStag} when exact discrete mass conservation or elimination of Rhie-Chow artefacts is important, for example in acoustic simulations or highly under-resolved LES.
+\end{tipbox}
+
+\subsection{Ghost Cell Support}
+
+Both \texttt{pimpleFoamStag} and \texttt{pimpleFoamPrecise} automatically detect ghost cell mode when a \texttt{ghostCells} cellZone exists in the mesh. When detected, the solvers:
+
+\begin{enumerate}
+    \item Overwrite ghost cell values for $\mathbf{U}$ and $p$ from extracted data at the \textbf{start} of each PIMPLE iteration (before momentum assembly)
+    \item Overwrite again \textbf{after} the pressure correction loop (to prevent drift from equation solving)
+\end{enumerate}
+
+Ghost cell data is read from \texttt{constant/boundaryData/ghostCells/<timeName>/U} and \texttt{p}. The solvers handle \texttt{FoamFile} headers automatically.
+
+\begin{notebox}
+The explicit ghost cell overwrite in the solver is an alternative to the \texttt{ghostCellConstraint} fvOption. The solver-side overwrite applies at the field level (outside the equation system), while the fvOption applies at the matrix level via \texttt{eqn.setValues()}. Both achieve the same result; the solver-side overwrite is simpler and requires no additional configuration.
+\end{notebox}
+
+% ----------------------------------------------------------------------------
+% GHOST CELL CONSTRAINT FVOPTION
+% ----------------------------------------------------------------------------
+
+\section{The \texttt{ghostCellConstraint} fvOption}
+\label{sec:ghostCellConstraint}
+
+The \texttt{ghostCellConstraint} is an \texttt{fvOption} that reads time-varying ghost cell data from disk and overrides the equation system in ghost cells using \texttt{eqn.setValues()}. It is instantiated as \texttt{scalarGhostCellConstraint} and \texttt{vectorGhostCellConstraint}.
+
+\subsection{Configuration}
+
+\begin{lstlisting}[language=OpenFOAM,caption={ghostCellConstraint fvOption configuration}]
+// In constant/fvOptions
+ghostU
+{
+    type            vectorGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (U);
+}
+
+ghostP
+{
+    type            scalarGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (p);
+}
+\end{lstlisting}
+
+\begin{table}[htbp]
+\centering
+\caption{ghostCellConstraint parameters}
+\label{tab:ghost-constraint-params}
+\begin{tabularx}{\textwidth}{@{}lllX@{}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Required} & \textbf{Description} \\
+\midrule
+\texttt{cellZone} & word & Yes & Name of the ghost cell zone \\
+\texttt{dataDir} & fileName & No & Path to boundaryData directory (default: \texttt{constant/boundaryData}) \\
+\texttt{fields} & wordList & Yes & Fields to constrain \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{How It Works}
+
+At each timestep, the fvOption:
+
+\begin{enumerate}
+    \item Reads ghost cell values from \texttt{<dataDir>/ghostCells/<timeName>/<fieldName>}
+    \item Maps data indices to cell indices using \texttt{ghostCellMap} (written by \texttt{spaceTimeWindowInitCase} with the \texttt{-ghostCells} flag)
+    \item Calls \texttt{eqn.setValues(cells, values)} to override the matrix rows for ghost cells
+\end{enumerate}
+
+The \texttt{setValues()} call replaces the matrix row for each ghost cell with a unit diagonal and moves the prescribed value to the source term, ensuring the linear solver produces exactly the prescribed value regardless of neighbouring cell contributions.
+
+\begin{notebox}
+For the pressure equation, the solver must call \texttt{fvOptions.constrain(pEqn)} after assembling the pressure matrix and before solving. Both \texttt{pimpleFoamStag} and \texttt{pimpleFoamPrecise} include this call. Standard \texttt{pimpleFoam} does not---if using the fvOption approach with standard \texttt{pimpleFoam}, add \texttt{fvOptions.constrain(pEqn)} to \texttt{pEqn.H}.
 \end{notebox}
 
 % ----------------------------------------------------------------------------

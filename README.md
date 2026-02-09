@@ -19,14 +19,16 @@ This library provides components for extracting a spatial subset from a full LES
 1. **spaceTimeWindowExtract** - Function object to extract boundary data during the original simulation
 2. **spaceTimeWindowInitCase** - Utility to initialize a reconstruction case from extracted data
 3. **pimpleFoamPrecise** - Modified pimpleFoam that registers intermediate velocity HbyA for highest fidelity reconstruction
-4. **spaceTimeWindowCoupledPressure** - Pressure BC that blends Dirichlet/Neumann based on flux direction
-5. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
+4. **pimpleFoamStag** - Mahesh-style hybrid staggered mesh solver with face-normal velocity as primary variable
+5. **spaceTimeWindowCoupledPressure** - Pressure BC that blends Dirichlet/Neumann based on flux direction
+6. **spaceTimeWindow** / **spaceTimeWindowInletOutlet** - Boundary conditions to apply extracted data during reconstruction
+7. **ghostCellConstraint** - fvOption that overrides equations in ghost cells with extracted data for machine-precision reconstruction
 
 ## Key Concepts
 
 ### Boundary Condition Approaches
 
-The library provides four approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`):
+The library provides five approaches for applying boundary conditions on the extraction boundary (`oldInternalFaces`), plus an optional ghost cell mode that can be combined with any approach:
 
 #### 1. Pressure-Coupled BC
 
@@ -233,6 +235,73 @@ spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 
 **Note:** Options `-preciseBC`, `-inletOutletBC`, and `-outletDirection` are mutually exclusive. Using incompatible combinations produces an error with guidance.
 
+#### 5. Ghost Cell Mode (`-ghostCells`) - Machine-Precision Reconstruction
+
+Includes one extra layer of cells ("ghost cells") outside the extraction boundary in the sub-mesh. Ghost cell values are prescribed from the extracted global simulation data at each timestep, pushing the boundary stencil mismatch one layer outward where it only affects the ghost cells (which are overwritten anyway). The original extraction boundary faces remain **internal** in the sub-mesh, preserving the identical FVM stencil as the global simulation.
+
+**Why ghost cells achieve machine-precision accuracy:**
+- Without ghost cells, cutting the domain converts internal faces to boundary faces, changing the FVM discretization stencil (TVD limiters, GAMG coarsening, gradient reconstruction). This limits accuracy to ~O(10^-3).
+- With ghost cells, the original extraction boundary faces stay internal. The stencil mismatch is pushed to the outer ghost boundary, affecting only ghost cells which are overwritten from extracted data.
+- All ghost cell data uses direct cell-center values (no interpolation), preserving machine-precision transfer.
+
+**Two ghost cell forcing mechanisms are provided:**
+
+1. **ghostCellConstraint fvOption** (recommended): Overrides the matrix equation in ghost cells via `eqn.setValues()`. Works with any solver that supports `fvOptions.constrain()`.
+
+2. **Explicit overwrite** (built into pimpleFoamStag/pimpleFoamPrecise): Directly writes ghost cell values into the field arrays. Activated automatically when a `ghostCells` cellZone exists.
+
+**Extraction configuration:**
+```cpp
+extractSubset
+{
+    type            spaceTimeWindowExtract;
+    libs            (spaceTimeWindow);
+    box             ((0.05 -0.15 0.01) (0.70 0.15 0.38));
+    outputDir       "../subset";
+
+    fields          (U p);
+    initialFields   (U p nut);
+
+    extractGhostCells   true;       // Enable ghost cell data extraction
+
+    writeFormat     deltaVarint;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+```
+
+**Reconstruction setup:**
+```bash
+# Case initialization with ghost cells
+spaceTimeWindowInitCase -sourceCase ../source-case -ghostCells
+
+# Run reconstruction (ghost cell overwrite is automatic)
+pimpleFoamStag    # or pimpleFoamPrecise
+```
+
+**Ghost cell fvOption configuration** (in `system/fvSolution` or `constant/fvOptions`):
+```cpp
+ghostU
+{
+    type            vectorGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (U);
+}
+
+ghostP
+{
+    type            scalarGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (p);
+}
+```
+
+**Note:** Ghost cell mode can be combined with any BC approach for the outer ghost boundary (defaults to `zeroGradient` on `oldInternalFaces`, since ghost cells are overwritten).
+
 ### Initial Fields vs Boundary Data Fields
 
 The extraction can separate which fields are used for:
@@ -401,6 +470,7 @@ functions
 | outputDir    | Output case directory for extracted data       | yes      | - |
 | fields       | List of fields for time-varying BC (boundaryData) | yes   | - |
 | initialFields | List of fields for initial conditions         | no       | same as fields |
+| extractGhostCells | Extract ghost cell data for machine-precision reconstruction | no | false |
 | writeFormat  | Format for boundary data: `ascii`, `binary`, `deltaVarint`, or `dvzt` | no | ascii |
 | deltaVarintPrecision | Decimal digits for delta-varint quantization | no | 6 |
 | writeCompression | Gzip compression for ascii/binary (ignored for deltaVarint) | no | off |
@@ -434,6 +504,11 @@ outputDir/
                 extractionMetadata  # Settings and timestep list
                 <time>/
                     U               # or U.dvz, U.dvz.zstd, U.dvzt.zstd, U.dvz.enc, U.dvz.zstd.enc
+            ghostCells/             # Only when extractGhostCells is true
+                cellCentres         # Ghost cell positions (written once)
+                <time>/
+                    U               # Cell-center values per timestep
+                    p
     <startTime>/                # Initial subset fields (always ASCII)
         U
         p
@@ -457,6 +532,9 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC
 # Alternative: fixed outlet direction for steady-mean flows
 spaceTimeWindowInitCase -sourceCase ../source-case -outletDirection "(1 0 0)"
 
+# Ghost cell mode: machine-precision reconstruction
+spaceTimeWindowInitCase -sourceCase ../source-case -ghostCells
+
 # With mass flux correction (optional, ensures exact mass conservation)
 spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFlux
 ```
@@ -471,6 +549,7 @@ spaceTimeWindowInitCase -sourceCase ../source-case -inletOutletBC -correctMassFl
 | -inletOutletBC   | Use flux-based inlet-outlet BC for U, zeroGradient for scalars (for quick tests) | no |
 | -outletDirection | Create fixed outlet patch in given direction (e.g., "(1 0 0)") | no |
 | -outletFraction  | Fraction of box extent for outlet region (default: 0.1) | no |
+| -ghostCells      | Include one layer of ghost cells outside extraction boundary for machine-precision reconstruction | no |
 | -correctMassFlux | Apply least-squares mass flux correction to boundaryData | no |
 | -initialFields   | Override initial fields list (e.g., "(U p nut k)") | no |
 | -refineLevel     | Refine mesh N times (each level splits cells ×8) | no |
@@ -667,6 +746,57 @@ Use this for:
 | timeInterpolationScheme | `none`, `linear`, or `cubic`            | no       | linear               |
 | reportFlux     | Print net flux through patch (velocity only)   | no       | false                |
 
+### ghostCellConstraint (fvOption)
+
+Runtime fvOption that reads time-varying ghost cell data from disk and overrides the equation system in ghost cells using `eqn.setValues()`. This ensures ghost cells maintain their prescribed values from the global simulation regardless of the local equation solution.
+
+Instantiated as `scalarGhostCellConstraint` and `vectorGhostCellConstraint`.
+
+```cpp
+// In constant/fvOptions or system/fvSolution
+ghostU
+{
+    type            vectorGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (U);
+}
+
+ghostP
+{
+    type            scalarGhostCellConstraint;
+    selectionMode   cellZone;
+    cellZone        ghostCells;
+    dataDir         "constant/boundaryData";
+    fields          (p);
+}
+```
+
+**Properties:**
+
+| Property       | Description                                    | Required | Default              |
+|----------------|------------------------------------------------|----------|----------------------|
+| dataDir        | Path to boundaryData directory                 | no       | constant/boundaryData |
+| cellZone       | Name of the ghost cell zone                    | yes      | -                    |
+| fields         | Fields to constrain                            | yes      | -                    |
+
+The ghost cell data is read from `<dataDir>/ghostCells/<timeName>/<fieldName>`. A mapping file at `<dataDir>/ghostCells/ghostCellMap` maps data indices to cell indices in the subset mesh. The mapping is written automatically by `spaceTimeWindowInitCase -ghostCells`.
+
+### pimpleFoamStag (Solver)
+
+Mahesh-style hybrid staggered mesh solver for incompressible, turbulent flow. Face-normal velocity `Un` is the primary kinematic variable, eliminating Rhie-Chow interpolation and providing exact discrete mass conservation.
+
+The algorithm per PIMPLE iteration:
+1. **Reconstruct** cell-centered U from face-normal Un via least-squares
+2. **Momentum**: Cell-centered UEqn using standard fvm/fvc operators
+3. **Project**: HbyA to face-normal UnStar
+4. **Pressure**: `fvm::laplacian(rAUf, p) == fvc::div(phiStar)`
+5. **Correct**: `Un = UnStar - rAUf * snGrad(p)` (exact, no Rhie-Chow)
+6. **Turbulence**: `turbulence->correct()` on final iteration
+
+Both `pimpleFoamStag` and `pimpleFoamPrecise` automatically detect ghost cell mode when a `ghostCells` cellZone exists in the mesh, and overwrite ghost cell values from extracted data at the start and end of each PIMPLE iteration.
+
 ### Time Interpolation Schemes
 
 | Scheme | Description | Points Used | Buffer Needed |
@@ -723,11 +853,12 @@ Creates an outlet patch where mass imbalance can escape:
 
 | Use Case | Command/Approach | Notes |
 |----------|---------|-------|
+| Machine-precision reconstruction | `-ghostCells` | Eliminates boundary stencil mismatch. Requires `pimpleFoamStag` or `pimpleFoamPrecise`. |
 | Highest fidelity reconstruction | `-preciseBC` | ~20% lower pressure error than default. Requires `pimpleFoamPrecise`. |
 | Accurate reconstruction | Pressure-coupled BC (default) | Reproduces original flow to solver tolerance. |
 | Quick tests | `-inletOutletBC` | Natural mass balance, may drift from source. |
 | Steady-mean flow direction | `-outletDirection "(1 0 0)"` | When outlet location is known. |
-| Maximum fidelity | `-preciseBC` + `-correctMassFlux` | Best accuracy. |
+| Maximum fidelity | `-ghostCells` + `-preciseBC` | Ghost cells + u* BC for best accuracy. |
 
 ## Boundary Data Compression
 
@@ -1149,6 +1280,7 @@ tar -cf ../boundaryData.tar */*.dvz.zstd
 - No temporal extrapolation - boundary data must cover full reconstruction time range
 - Steady-state solvers not supported (requires transient simulation)
 - For parallel extraction, `reconstructPar` must be run before `spaceTimeWindowInitCase`
+- Ghost cell mode (`-ghostCells`) requires `pimpleFoamStag` or `pimpleFoamPrecise` for the explicit overwrite; alternatively, any solver supporting `fvOptions.constrain()` can use the `ghostCellConstraint` fvOption
 
 ## References
 

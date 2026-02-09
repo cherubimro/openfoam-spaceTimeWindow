@@ -1140,6 +1140,14 @@ int main(int argc, char *argv[])
         "The spaceTimeWindow BC handles spatial interpolation of boundaryData at runtime."
     );
 
+    argList::addBoolOption
+    (
+        "ghostCells",
+        "Include one layer of ghost cells outside extraction boundary. "
+        "Ghost cells are overwritten from extracted data each timestep, "
+        "preserving the internal FVM stencil at the original boundary."
+    );
+
     argList::noParallel();
     argList::noFunctionObjects();
 
@@ -1231,6 +1239,9 @@ int main(int argc, char *argv[])
         hasUserInitialFields = true;
     }
 
+    // Ghost cell option
+    bool useGhostCells = args.found("ghostCells");
+
     // Mesh refinement/coarsening options
     label refineLevel = args.getOrDefault<label>("refineLevel", 0);
     label coarsenLevel = args.getOrDefault<label>("coarsenLevel", 0);
@@ -1276,6 +1287,10 @@ int main(int argc, char *argv[])
         Info<< "    Inlet-outlet BC mode: enabled" << nl
             << "        U: spaceTimeWindowInletOutlet (flux-based Dirichlet/zeroGradient)" << nl
             << "        All scalar fields (p, nut, k, epsilon, omega, etc.): zeroGradient" << nl;
+    }
+    if (useGhostCells)
+    {
+        Info<< "    Ghost cells: enabled (one extra layer outside extraction boundary)" << nl;
     }
     if (hasUserInitialFields)
     {
@@ -1706,7 +1721,40 @@ int main(int argc, char *argv[])
                 << exit(FatalError);
         }
 
-        // Create mesh subset
+        // Ghost cell identification: add one layer of cells outside box
+        labelHashSet cellsInBoxSet(cellsInBox);
+        labelHashSet ghostCellSet;
+
+        if (useGhostCells)
+        {
+            for (label facei = 0; facei < sourceMesh.nInternalFaces(); ++facei)
+            {
+                label owner = sourceMesh.faceOwner()[facei];
+                label neighbour = sourceMesh.faceNeighbour()[facei];
+                bool ownerIn = cellsInBoxSet.found(owner);
+                bool neighbourIn = cellsInBoxSet.found(neighbour);
+
+                if (ownerIn && !neighbourIn)
+                {
+                    ghostCellSet.insert(neighbour);
+                }
+                else if (neighbourIn && !ownerIn)
+                {
+                    ghostCellSet.insert(owner);
+                }
+            }
+
+            Info<< "    Ghost cells: " << ghostCellSet.size()
+                << " cells outside extraction boundary" << endl;
+
+            // Add ghost cells to cellsInBox for subset creation
+            for (label celli : ghostCellSet.sortedToc())
+            {
+                cellsInBox.append(celli);
+            }
+        }
+
+        // Create mesh subset (inside cells + ghost cells)
         fvMeshSubset meshSubset(sourceMesh);
         meshSubset.setCellSubset(cellsInBox);
 
@@ -1714,6 +1762,48 @@ int main(int argc, char *argv[])
         const polyMesh& pm = subMesh;
 
         Info<< "    Created subset mesh with " << subMesh.nCells() << " cells" << endl;
+
+        // Create ghostCells cellZone in subset mesh
+        if (useGhostCells && ghostCellSet.size() > 0)
+        {
+            const labelList& cellMap = meshSubset.cellMap();
+
+            // Build reverse map: original cell -> subset cell
+            Map<label> origToSubset;
+            forAll(cellMap, subI)
+            {
+                origToSubset.insert(cellMap[subI], subI);
+            }
+
+            // Ghost cells in subset numbering
+            DynamicList<label> ghostCellsSubset;
+            for (label origI : ghostCellSet.sortedToc())
+            {
+                auto iter = origToSubset.find(origI);
+                if (iter.good())
+                {
+                    ghostCellsSubset.append(iter.val());
+                }
+            }
+
+            // Add cellZone to subset mesh
+            cellZoneMesh& czm =
+                const_cast<cellZoneMesh&>(subMesh.cellZones());
+            czm.clearAddressing();
+            czm.append
+            (
+                new cellZone
+                (
+                    "ghostCells",
+                    ghostCellsSubset,
+                    czm.size(),
+                    czm
+                )
+            );
+
+            Info<< "    Created ghostCells cellZone with "
+                << ghostCellsSubset.size() << " cells" << endl;
+        }
 
         // Write the subset mesh to extractDir
         mkDir(meshDir);
@@ -2258,6 +2348,77 @@ int main(int argc, char *argv[])
 
         Info<< "    Written subset mesh to " << meshDir << endl;
 
+        // Write cellZones if ghost cells are used
+        if (useGhostCells && ghostCellSet.size() > 0)
+        {
+            const cellZoneMesh& czm = subMesh.cellZones();
+
+            // Write cellZones file
+            OFstream czOs(meshDir / "cellZones");
+            writeHeader(czOs, "regIOobject", "cellZones");
+
+            czOs << czm.size() << nl << "(" << nl;
+            forAll(czm, zonei)
+            {
+                czOs << czm[zonei].name() << nl
+                     << "{" << nl
+                     << "    type cellZone;" << nl
+                     << "    cellLabels List<label>" << nl
+                     << "    " << czm[zonei].size() << nl
+                     << "    (" << nl;
+                for (label celli : czm[zonei])
+                {
+                    czOs << "        " << celli << nl;
+                }
+                czOs << "    );" << nl
+                     << "}" << nl;
+            }
+            czOs << ")" << nl;
+
+            Info<< "    Written cellZones to " << meshDir << endl;
+
+            // Write ghostCellMap: maps ghost data index -> subset mesh cell index
+            // Ghost data is ordered by sorted original cell index (matches extraction output)
+            const labelList& cellMap = meshSubset.cellMap();
+            Map<label> origToSubset;
+            forAll(cellMap, subI)
+            {
+                origToSubset.insert(cellMap[subI], subI);
+            }
+
+            fileName ghostMapDir =
+                extractDir / "constant" / "boundaryData" / "ghostCells";
+            mkDir(ghostMapDir);
+
+            OFstream mapOs(ghostMapDir / "ghostCellMap");
+            writeHeader(mapOs, "labelList", "ghostCellMap");
+            mapOs << "// Maps ghost data index -> subset mesh cell index" << nl;
+            mapOs << "// Ghost data is ordered by sorted original cell index" << nl;
+
+            labelList sortedGhostOrig = ghostCellSet.sortedToc();
+            labelList mapData(sortedGhostOrig.size());
+            forAll(sortedGhostOrig, i)
+            {
+                auto iter = origToSubset.find(sortedGhostOrig[i]);
+                if (iter.good())
+                {
+                    mapData[i] = iter.val();
+                }
+                else
+                {
+                    FatalErrorInFunction
+                        << "Ghost cell " << sortedGhostOrig[i]
+                        << " not found in subset mesh" << nl
+                        << exit(FatalError);
+                }
+            }
+            mapOs << mapData;
+
+            Info<< "    Written ghostCellMap ("
+                << mapData.size() << " entries) to "
+                << ghostMapDir << endl;
+        }
+
         // Also extract initial fields from source case at the reconstruction start time (t_1)
         // This is needed because parallel extraction doesn't write initial fields
         // (cell ordering would not match the mesh created here)
@@ -2663,7 +2824,13 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (usePreciseBC && fieldName == "p")
+                    if (useGhostCells)
+                    {
+                        // Ghost mode: oldInternalFaces is at the outer ghost boundary
+                        // Ghost cells are overwritten, so outer BC doesn't matter
+                        os << "        type            zeroGradient;" << nl;
+                    }
+                    else if (usePreciseBC && fieldName == "p")
                     {
                         // With -preciseBC: p uses coupledPressure with gradp
                         os << "        type            spaceTimeWindowCoupledPressure;" << nl
@@ -2692,7 +2859,7 @@ int main(int argc, char *argv[])
                     os << "    }" << nl;
                     os << '}' << nl;
 
-                    if (!fieldInBoundaryData)
+                    if (!fieldInBoundaryData && !useGhostCells)
                     {
                         Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
                     }
@@ -2745,7 +2912,12 @@ int main(int argc, char *argv[])
                     os << "    oldInternalFaces" << nl
                        << "    {" << nl;
 
-                    if (usePreciseBC && fieldName == "U")
+                    if (useGhostCells)
+                    {
+                        // Ghost mode: oldInternalFaces is at the outer ghost boundary
+                        os << "        type            zeroGradient;" << nl;
+                    }
+                    else if (usePreciseBC && fieldName == "U")
                     {
                         // With -preciseBC: U reads HbyA data via fieldTableName
                         os << "        type            spaceTimeWindow;" << nl
@@ -2782,7 +2954,10 @@ int main(int argc, char *argv[])
                     {
                         // Field NOT in boundaryData - use zeroGradient (no time-varying data)
                         os << "        type            zeroGradient;" << nl;
-                        Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                        if (!useGhostCells)
+                        {
+                            Info<< "        Note: " << fieldName << " not in boundaryData, using zeroGradient BC" << endl;
+                        }
                     }
                     os << "    }" << nl;
                     os << '}' << nl;
@@ -3034,7 +3209,14 @@ int main(int argc, char *argv[])
                 std::string newBoundaryField = "boundaryField\n{\n    oldInternalFaces\n    {\n";
                 word bcType;
 
-                if (usePreciseBC && fieldName == "U")
+                if (useGhostCells)
+                {
+                    // Ghost mode: oldInternalFaces is at the outer ghost boundary
+                    // Ghost cells are overwritten from data, so outer BC is irrelevant
+                    newBoundaryField += "        type            zeroGradient;\n";
+                    bcType = "zeroGradient (ghost outer boundary)";
+                }
+                else if (usePreciseBC && fieldName == "U")
                 {
                     // With -preciseBC: U reads HbyA data via fieldTableName
                     newBoundaryField += "        type            spaceTimeWindow;\n";
@@ -4336,8 +4518,19 @@ int main(int argc, char *argv[])
         << "  1. (Optional) Adjust writeInterval in system/controlDict" << nl
         << "  2. Review boundary conditions in " << initialTimeDir << "/" << nl
         << "  3. Run the solver:" << nl
-        << "     " << metadata.getOrDefault<word>("solver", "pimpleFoam") << nl
-        << nl;
+        << "     " << metadata.getOrDefault<word>("solver", "pimpleFoam") << nl;
+
+    if (useGhostCells)
+    {
+        Info<< nl
+            << "Ghost cell mode:" << nl
+            << "  - Ghost cells will be overwritten from constant/boundaryData/ghostCells/" << nl
+            << "  - oldInternalFaces patch is at the outer ghost boundary (zeroGradient)" << nl
+            << "  - Original extraction boundary faces are internal (stencil preserved)" << nl
+            << "  - Use fvOptions (ghostCellConstraint) or solver-level overwrite" << nl;
+    }
+
+    Info<< nl;
 
     Info<< "End" << nl << endl;
 

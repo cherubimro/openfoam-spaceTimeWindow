@@ -48,6 +48,7 @@ while (pimple.correctNonOrthogonal())
     );
 
     pEqn.setReference(pRefCell, pRefValue);
+    fvOptions.constrain(pEqn);
 
     pEqn.solve(p.select(pimple.finalInnerIter()));
 

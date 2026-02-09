@@ -222,6 +222,17 @@ protected:
         //- Whether t_2 (third timestep) has been written to disk (for cubic interp)
         bool t2Written_;
 
+        // Ghost cell support
+
+        //- Enable ghost cell data extraction
+        bool extractGhostCells_;
+
+        //- Sorted unique ghost cell indices (original mesh, local processor)
+        labelList uniqueGhostCells_;
+
+        //- Whether ghost cell centres have been written
+        bool ghostCellsWritten_;
+
 
     // Protected Member Functions
 
@@ -270,6 +281,9 @@ protected:
 
         //- Write boundary data for current time
         void writeBoundaryData();
+
+        //- Write ghost cell data for current time
+        void writeGhostCellData();
 
         //- Update metadata with timestep list (called at end)
         void updateMetadataTimesteps();

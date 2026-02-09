@@ -7,5 +7,6 @@ fvPatchFields/derived/spaceTimeWindowFvPatchField/spaceTimeWindowFvPatchFields.C
 fvPatchFields/derived/spaceTimeWindowInletOutletFvPatchField/spaceTimeWindowInletOutletFvPatchFields.C
 fvPatchFields/derived/spaceTimeWindowCoupledPressureFvPatchField/spaceTimeWindowCoupledPressureFvPatchScalarField.C
 functionObjects/field/spaceTimeWindowExtract/spaceTimeWindowExtract.C
+fvOptions/constraints/ghostCellConstraint/ghostCellConstraints.C
 
 LIB = $(FOAM_USER_LIBBIN)/libspaceTimeWindow

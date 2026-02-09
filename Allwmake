@@ -75,6 +75,11 @@ echo ""
 echo "Building pimpleFoamPrecise solver..."
 wmake src/pimpleFoamPrecise
 
+# Build the pimpleFoamStag solver (Mahesh-style hybrid staggered mesh)
+echo ""
+echo "Building pimpleFoamStag solver..."
+wmake src/pimpleFoamStag
+
 # Build the compareDvz utility (debug/testing tool)
 echo ""
 echo "Building compareDvz utility..."
@@ -86,6 +91,7 @@ echo "Library: \$FOAM_USER_LIBBIN/libspaceTimeWindow.so"
 echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowInitCase"
 echo "Utility: \$FOAM_USER_APPBIN/compareDvz"
 echo "Solver:  \$FOAM_USER_APPBIN/pimpleFoamPrecise"
+echo "Solver:  \$FOAM_USER_APPBIN/pimpleFoamStag"
 if [ -n "$FOAM_USE_SODIUM" ]; then
     echo "Utility: \$FOAM_USER_APPBIN/spaceTimeWindowKeygen"
     echo "Encryption: enabled"

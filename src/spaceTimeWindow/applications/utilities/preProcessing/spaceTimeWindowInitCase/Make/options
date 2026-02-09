@@ -14,6 +14,7 @@ endif
 
 EXE_LIBS = \
     -lfiniteVolume \
+    -lfvOptions \
     -lmeshTools \
     -ldynamicMesh \
     -L$(FOAM_USER_LIBBIN) \

@@ -25,57 +25,36 @@ License
     along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
 
 Application
-    pimpleFoamPrecise
+    pimpleFoamStag
 
 Group
     grpIncompressibleSolvers
 
 Description
     Transient solver for incompressible, turbulent flow of Newtonian fluids
-    on a moving mesh.
+    using a Mahesh-style hybrid staggered mesh approach.
 
-    Modified from pimpleFoam to register the intermediate velocity HbyA
-    (u*) in the objectRegistry, enabling function objects to access the
-    pre-pressure-correction velocity for precise subdomain boundary data
-    extraction (Wu, Zaki, Meneveau, Phys. Rev. Fluids 5, 064607, 2020).
+    Face-normal velocity Un is the primary kinematic variable. The pressure
+    correction acts directly on Un, eliminating Rhie-Chow interpolation
+    and providing exact discrete mass conservation.
 
-    \heading Solver details
-    The solver uses the PIMPLE (merged PISO-SIMPLE) algorithm to solve the
-    continuity equation:
+    Momentum is assembled at cell centers (reusing all standard fvm/fvc
+    operators, turbulence models, and boundary conditions). Cell-centered
+    velocity U is reconstructed from Un via least-squares each iteration.
 
-        \f[
-            \div \vec{U} = 0
-        \f]
-
-    and momentum equation:
-
-        \f[
-            \ddt{\vec{U}} + \div \left( \vec{U} \vec{U} \right) - \div \gvec{R}
-          = - \grad p + \vec{S}_U
-        \f]
-
-    Where:
-    \vartable
-        \vec{U} | Velocity
-        p       | Pressure
-        \vec{R} | Stress tensor
-        \vec{S}_U | Momentum source
-    \endvartable
-
-    Sub-models include:
-    - turbulence modelling, i.e. laminar, RAS or LES
-    - run-time selectable MRF and finite volume options, e.g. explicit porosity
+    \heading Algorithm per time step, per PIMPLE iteration:
+    1. RECONSTRUCT: U_cell from Un (faces) via least-squares
+    2. MOMENTUM:    Cell-centered UEqn (standard fvm operators)
+    3. PROJECT:     HbyA -> face-normal UnStar
+    4. PRESSURE:    fvm::laplacian(rAUf, p) == fvc::div(phiStar)
+    5. CORRECT:     Un = UnStar - rAUf * snGrad(p)  [EXACT, no Rhie-Chow]
+    6. TURBULENCE:  turbulence->correct() on final iteration
 
     \heading Required fields
     \plaintable
         U       | Velocity [m/s]
         p       | Kinematic pressure, p/rho [m2/s2]
         \<turbulence fields\> | As required by user selection
-    \endplaintable
-
-    \heading Registered fields
-    \plaintable
-        HbyA    | Intermediate velocity H(U)/A (pre-pressure-correction) [m/s]
     \endplaintable
 
 Note
@@ -102,8 +81,8 @@ int main(int argc, char *argv[])
     argList::addNote
     (
         "Transient solver for incompressible, turbulent flow"
-        " of Newtonian fluids on a moving mesh."
-        " Registers HbyA (intermediate velocity) for function objects."
+        " using hybrid staggered mesh (Mahesh-style)."
+        " Face-normal velocity is the primary kinematic variable."
     );
 
     #include "postProcess.H"
@@ -188,18 +167,34 @@ int main(int argc, char *argv[])
                     {
                         #include "meshCourantNo.H"
                     }
+
+                    // Recompute reconTensor after mesh motion
+                    reconTensor = inv
+                    (
+                        fvc::surfaceSum(SfHat * mesh.Sf())
+                      + dimensionedTensor
+                        (
+                            "small",
+                            dimArea,
+                            symmTensor(SMALL, 0, 0, SMALL, 0, SMALL)
+                        )
+                    );
                 }
             }
 
-            // Overwrite ghost cells before momentum assembly
+            // Step 0: Overwrite ghost cells from extracted data
             if (useGhostCells)
             {
                 #include "overwriteGhostCells.H"
             }
 
+            // Step 1: Reconstruct cell-centered U from face-normal Un
+            #include "reconstructU.H"
+
+            // Step 2: Assemble and solve cell-centered momentum equation
             #include "UEqn.H"
 
-            // --- Pressure corrector loop
+            // Step 3-5: Pressure correction loop (acts on Un directly)
             while (pimple.correct())
             {
                 #include "pEqn.H"
@@ -211,6 +206,7 @@ int main(int argc, char *argv[])
                 #include "overwriteGhostCells.H"
             }
 
+            // Step 6: Turbulence correction
             if (pimple.turbCorr())
             {
                 laminarTransport.correct();

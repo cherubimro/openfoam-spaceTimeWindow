@@ -148,6 +148,43 @@ void Foam::functionObjects::spaceTimeWindowExtract::initializeSubset()
     // Build set of cells inside box for fast lookup
     labelHashSet cellsInBoxSet(cellsInBox);
 
+    // Ghost cell identification: one layer of cells outside the extraction box
+    if (extractGhostCells_)
+    {
+        labelHashSet ghostSet;
+
+        // Internal faces: find outside cells adjacent to inside cells
+        for (label facei = 0; facei < mesh_.nInternalFaces(); ++facei)
+        {
+            label owner = mesh_.faceOwner()[facei];
+            label neighbour = mesh_.faceNeighbour()[facei];
+            bool ownerIn = cellsInBoxSet.found(owner);
+            bool neighbourIn = cellsInBoxSet.found(neighbour);
+
+            if (ownerIn && !neighbourIn)
+            {
+                ghostSet.insert(neighbour);
+            }
+            else if (neighbourIn && !ownerIn)
+            {
+                ghostSet.insert(owner);
+            }
+        }
+
+        // For processor boundaries: ghost cells on remote processors are
+        // handled by the existing parallel interpolation infrastructure.
+        // Only local ghost cells are collected here.
+
+        uniqueGhostCells_ = ghostSet.sortedToc();
+
+        label localGhosts = uniqueGhostCells_.size();
+        label totalGhosts = localGhosts;
+        reduce(totalGhosts, sumOp<label>());
+
+        Info<< "    Ghost cells: " << localGhosts << " local, "
+            << totalGhosts << " total" << endl;
+    }
+
     // Identify boundary faces of the extraction region:
     // 1. Internal faces where one cell is inside, one is outside
     // 2. Processor boundary faces where local cell is inside, remote is outside
@@ -1065,6 +1102,16 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeSubsetMesh()
             }
             os.writeEntry("encrypted", useEncryption_);
 
+            // Ghost cell info
+            os << nl << "// Ghost cell data" << nl;
+            os.writeEntry("extractGhostCells", extractGhostCells_);
+            if (extractGhostCells_)
+            {
+                label totalGhosts = uniqueGhostCells_.size();
+                reduce(totalGhosts, sumOp<label>());
+                os.writeEntry("nGhostCells", totalGhosts);
+            }
+
             Info<< "    Written extraction metadata:" << nl
                 << "        openfoamVersion = " << foamVersion::version << nl
                 << "        openfoamApi = " << foamVersion::api << nl
@@ -1444,6 +1491,118 @@ void Foam::functionObjects::spaceTimeWindowExtract::writeBoundaryData()
                 WarningInFunction
                     << "Field '" << fieldName << "' not found for gradient extraction"
                     << endl;
+            }
+        }
+    }
+}
+
+
+void Foam::functionObjects::spaceTimeWindowExtract::writeGhostCellData()
+{
+    if (!extractGhostCells_ || uniqueGhostCells_.empty())
+    {
+        return;
+    }
+
+    const word timeName = mesh_.time().timeName();
+
+    // Create ghost cell output directory
+    fileName ghostTimeDir =
+        outputDir_ / "constant" / "boundaryData" / "ghostCells" / timeName;
+
+    if (Pstream::master())
+    {
+        mkDir(ghostTimeDir);
+    }
+
+    if (Pstream::parRun())
+    {
+        UPstream::barrier(UPstream::worldComm);
+    }
+
+    // Write ghost cell centres once
+    if (!ghostCellsWritten_)
+    {
+        vectorField centres(uniqueGhostCells_.size());
+        forAll(uniqueGhostCells_, i)
+        {
+            centres[i] = mesh_.cellCentres()[uniqueGhostCells_[i]];
+        }
+
+        // Gather to master and write
+        if (Pstream::parRun())
+        {
+            tmp<vectorField> tgathered = gatherFieldToMaster(centres);
+            if (Pstream::master())
+            {
+                fileName ghostDir =
+                    outputDir_ / "constant" / "boundaryData" / "ghostCells";
+                writeField(ghostDir, "cellCentres", tgathered());
+            }
+        }
+        else
+        {
+            fileName ghostDir =
+                outputDir_ / "constant" / "boundaryData" / "ghostCells";
+            writeField(ghostDir, "cellCentres", centres);
+        }
+
+        ghostCellsWritten_ = true;
+
+        Info<< type() << " " << name()
+            << ": Written ghost cell centres ("
+            << uniqueGhostCells_.size() << " cells)" << endl;
+    }
+
+    // Write cell-center values for each field
+    for (const word& fieldName : fieldNames_)
+    {
+        // Try scalar field
+        const auto* sfPtr = mesh_.findObject<volScalarField>(fieldName);
+        if (sfPtr)
+        {
+            scalarField values(uniqueGhostCells_.size());
+            forAll(uniqueGhostCells_, i)
+            {
+                values[i] = (*sfPtr)[uniqueGhostCells_[i]];
+            }
+
+            if (Pstream::parRun())
+            {
+                tmp<scalarField> tgathered = gatherFieldToMaster(values);
+                if (Pstream::master())
+                {
+                    writeField(ghostTimeDir, fieldName, tgathered());
+                }
+            }
+            else
+            {
+                writeField(ghostTimeDir, fieldName, values);
+            }
+            continue;
+        }
+
+        // Try vector field
+        const auto* vfPtr = mesh_.findObject<volVectorField>(fieldName);
+        if (vfPtr)
+        {
+            vectorField values(uniqueGhostCells_.size());
+            forAll(uniqueGhostCells_, i)
+            {
+                values[i] = (*vfPtr)[uniqueGhostCells_[i]];
+            }
+
+            if (Pstream::parRun())
+            {
+                tmp<vectorField> tgathered = gatherFieldToMaster(values);
+                if (Pstream::master())
+                {
+                    writeField(ghostTimeDir, fieldName, tgathered());
+                }
+            }
+            else
+            {
+                writeField(ghostTimeDir, fieldName, values);
             }
         }
     }
@@ -1876,7 +2035,10 @@ Foam::functionObjects::spaceTimeWindowExtract::spaceTimeWindowExtract
     hasProcessorBoundaryFaces_(false),
     timestepCount_(0),
     t1Written_(false),
-    t2Written_(false)
+    t2Written_(false),
+    extractGhostCells_(false),
+    uniqueGhostCells_(),
+    ghostCellsWritten_(false)
 {
     read(dict);
 }
@@ -1955,6 +2117,14 @@ bool Foam::functionObjects::spaceTimeWindowExtract::read(const dictionary& dict)
     if (!dict.readIfPresent("initialFields", initialFieldNames_))
     {
         initialFieldNames_ = fieldNames_;
+    }
+
+    // Read ghost cell extraction option
+    extractGhostCells_ = dict.getOrDefault<bool>("extractGhostCells", false);
+    if (extractGhostCells_)
+    {
+        Info<< type() << " " << name()
+            << ": Ghost cell extraction enabled" << endl;
     }
 
     // Read gradient extraction options (for pressure-coupled BC)
@@ -2148,6 +2318,12 @@ bool Foam::functionObjects::spaceTimeWindowExtract::execute()
     // Write boundary data at EVERY timestep (not just write intervals)
     // This is critical - the spaceTimeWindow BC needs data at every timestep
     writeBoundaryData();
+
+    // Write ghost cell data alongside boundary data
+    if (extractGhostCells_)
+    {
+        writeGhostCellData();
+    }
 
     // Force write at t_1 (second timestep, index 1) for linear interpolation
     // Linear interpolation only requires t_0 as lookback buffer, so the
